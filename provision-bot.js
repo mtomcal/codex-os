@@ -49,6 +49,17 @@
         "If all four files are readable, the status bot is " + id + ", and integrity is ok, reply exactly: " + ready,
         "Otherwise report the blocker. Do not change the manifest, configure sources or schedules, or delegate this check.",
     ].join("\n");
+    function matchesStartupInput(item) {
+        if (item?.type === "userMessage") {
+            return item.content?.length === 1 && item.content[0]?.type === "text" && item.content[0].text === prompt;
+        }
+        if (item?.type !== "functionCallOutput" || item.namespace !== "codex_app" || item.name !== "create_thread")
+            return false;
+        const output = item.output;
+        if (output?.truncated !== false || typeof output.text !== "string") return false;
+        const header = output.text.match(/^<codex_delegation>\n  <source_thread_id>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}<\/source_thread_id>\n  <input>/);
+        return header !== null && output.text === header[0] + prompt + "</input>\n</codex_delegation>";
+    }
     async function matches(archived) {
         const found = [];
         let cursor;
@@ -95,7 +106,7 @@
     }
 
     const chatId = chats[0].id;
-    const detail = await native("mcp__codex_app__read_thread", {threadId: chatId, hostId, itemLimit: 100});
+    const detail = await native("mcp__codex_app__read_thread", {threadId: chatId, hostId, itemLimit: 100, includeOutputs: true});
     if (detail.thread?.id !== chatId || detail.thread.kind !== "codex" ||
         detail.thread.hostId !== hostId || detail.thread.cwd !== directory)
         return status("main_chat_mismatch", "Check the main chat's project and working directory before resuming.", {chatId});
@@ -106,8 +117,7 @@
         return status("waiting_for_startup", "Resume when the main chat's startup turn finishes.", {chatId});
 
     const items = turn?.items ?? [];
-    const requested = items.some(item => item.type === "userMessage" &&
-        item.content?.some(part => part.type === "text" && part.text === prompt));
+    const requested = !turn?.nextItemCursor && matchesStartupInput(items[0]);
     const ranStatus = items.some(item => item.type === "commandExecution" && item.cwd === directory &&
         [command, "'" + command + "'", '"' + command + '"'].includes(
             item.command?.replace(/^(?:\S+\/)?(?:sh|bash|zsh) -lc /, "")) &&
