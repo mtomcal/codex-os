@@ -30,12 +30,21 @@ def install(db):
         requirement TEXT NOT NULL, handoff TEXT NOT NULL DEFAULT 'pending'
             CHECK(handoff IN ('pending','sending','sent')),
         authorization TEXT, evidence TEXT, updated TEXT NOT NULL)""")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(dispatch_additions)")}
+    if "required" not in columns:
+        db.execute("ALTER TABLE dispatch_additions ADD COLUMN required INTEGER NOT NULL DEFAULT 0")
+    if "acknowledgement" not in columns:
+        db.execute("ALTER TABLE dispatch_additions ADD COLUMN acknowledgement TEXT")
+        db.execute("ALTER TABLE dispatch_additions ADD COLUMN acknowledgement_turn TEXT")
+    if "send_denial" not in columns:
+        db.execute("ALTER TABLE dispatch_additions ADD COLUMN send_denial TEXT")
 
 
 def pending_handoffs(db):
     return [dict(row) for row in db.execute("""SELECT a.key,a.parent,a.handoff,d.state,d.host,d.worker
         FROM dispatch_additions a JOIN dispatches d ON d.key=a.parent
-        WHERE a.handoff!='sent' ORDER BY a.updated,a.key""")]
+        WHERE a.handoff!='sent' OR (a.required AND a.acknowledgement IS NULL)
+        ORDER BY a.updated,a.key""")]
 
 
 def pending(db):
@@ -96,6 +105,7 @@ def commands(sub):
             action.add_argument("--scope", required=True, type=short_text)
             action.add_argument("--reuse", type=key_text, help="Reuse this dispatch's bound worker")
             action.add_argument("--requirement", type=short_text, help="Additional work within the existing scope")
+            action.add_argument("--required", action="store_true", help="Require adoption of a reused assignment")
             action.add_argument("--plan", metavar="JSON", help="Permission requests to record for this dispatch")
             action.add_argument("--prepare", action="store_true", help="Record intake without claiming a launch")
         if name in {"reserve", "permissions"}:
@@ -105,10 +115,18 @@ def commands(sub):
             operation.add_argument("--claim", type=short_text, metavar="AUTHORIZATION")
             operation.add_argument("--sent", type=short_text, metavar="EVIDENCE")
             operation.add_argument("--reset", type=short_text, metavar="EVIDENCE")
+            operation.add_argument("--denied", type=short_text, metavar="EVIDENCE")
+            operation.add_argument("--acknowledged", type=short_text, metavar="WORKER_EVIDENCE")
+            action.add_argument("--host", type=short_text)
+            action.add_argument("--worker", type=short_text)
+            action.add_argument("--turn", type=short_text)
         if name == "bind":
             action.add_argument("thread_id", type=short_text)
             action.add_argument("--host", type=short_text, default="local")
+        if name == "report":
+            action.add_argument("--covers", action="append", type=key_text, default=[], metavar="REQUIREMENT")
         if name == "review":
+            action.add_argument("--verified", action="append", type=key_text, default=[], metavar="REQUIREMENT")
             action.add_argument("--decision", choices=("accept", "reject"), required=True)
         if name in {"report", "review", "abandon", "delivered", "cleaned"}:
             action.add_argument("--evidence", required=True, type=short_text)
@@ -133,10 +151,13 @@ def reserve(db, args, stamp):
     key = args.key
     if bool(args.reuse) != bool(args.requirement):
         raise ValueError("Supply --reuse and --requirement together")
+    if args.required and not args.reuse:
+        raise ValueError("--required applies only to a reused dispatch")
     existing = addition(db, key)
     if existing:
-        if (args.reuse, args.requirement, args.objective, args.scope) != (
-                existing["parent"], existing["requirement"], existing["objective"], existing["scope"]):
+        if (args.reuse, args.requirement, args.objective, args.scope, args.required) != (
+                existing["parent"], existing["requirement"], existing["objective"], existing["scope"],
+                bool(existing["required"])):
             raise ValueError("Dispatch key already identifies a different request")
         return reserve_permissions(db, args, dict(existing, launch=False), allow_new=False)
     if args.reuse:
@@ -147,8 +168,8 @@ def reserve(db, args, stamp):
             raise ValueError("Reuse requires a running dispatch with a bound worker")
         if (args.objective, args.scope) != (parent["objective"], parent["scope"]):
             raise ValueError("Reuse requires the existing dispatch's exact objective and scope")
-        db.execute("INSERT INTO dispatch_additions(key,parent,requirement,updated) VALUES(?,?,?,?)",
-                   (key, args.reuse, args.requirement, stamp))
+        db.execute("""INSERT INTO dispatch_additions(key,parent,requirement,updated,required)
+                   VALUES(?,?,?,?,?)""", (key, args.reuse, args.requirement, stamp, args.required))
         return reserve_permissions(db, args, dict(addition(db, key), launch=False), allow_new=True)
     db.execute("""INSERT INTO dispatches(key,objective,scope,state,updated,launch_issued)
         VALUES(?,?,?,'reserved',?,0) ON CONFLICT(key) DO NOTHING""",
@@ -169,7 +190,21 @@ def handoff(db, args, stamp):
     record = addition(db, args.key)
     if record is None:
         raise ValueError(f"Unknown added requirement: {args.key}")
+    if args.acknowledged:
+        return acknowledge(db, args, stamp, record)
+    if args.host or args.worker or args.turn:
+        raise ValueError("--host, --worker and --turn apply only to --acknowledged")
     current = record["handoff"]
+    if record["send_denial"]:
+        if args.claim or args.denied == record["send_denial"]:
+            return dict(record, send=False)
+        raise ValueError("The native send was denied")
+    if args.denied:
+        if current != "sending":
+            raise ValueError("Record a native denial only after claiming the send")
+        db.execute("UPDATE dispatch_additions SET send_denial=?, updated=? WHERE key=?",
+                   (args.denied, stamp, args.key))
+        return dict(record, send_denial=args.denied, updated=stamp, send=False)
     if args.claim:
         if current != "pending":
             return dict(record, send=False)
@@ -191,6 +226,36 @@ def handoff(db, args, stamp):
     columns = ", ".join(f"{field}=?" for field in changes)
     db.execute(f"UPDATE dispatch_additions SET {columns} WHERE key=?", (*changes.values(), args.key))
     return dict(record, **changes, send=bool(args.claim))
+
+
+def acknowledge(db, args, stamp, record):
+    if not (args.host and args.worker and args.turn):
+        raise ValueError("Supply the observed --host, --worker and --turn")
+    if (args.host, args.worker) != (record["host"], record["worker"]):
+        raise ValueError("Acknowledgement must come from the exact bound worker")
+    if not record["required"] or record["handoff"] != "sent":
+        raise ValueError("Acknowledgement requires a confirmed send for a required handoff")
+    changes = {"acknowledgement": args.acknowledged, "acknowledgement_turn": args.turn}
+    if all(record[field] == value for field, value in changes.items()):
+        return dict(record, send=False)
+    if record["acknowledgement"]:
+        raise ValueError("Acknowledgement is already recorded")
+    if record["state"] != "running":
+        raise ValueError("The bound dispatch is no longer running")
+    db.execute("""UPDATE dispatch_additions SET acknowledgement=?, acknowledgement_turn=?, updated=?
+        WHERE key=?""", (args.acknowledged, args.turn, stamp, args.key))
+    return dict(record, **changes, updated=stamp, send=False)
+
+
+def check_required_additions(db, parent, covered):
+    rows = db.execute("""SELECT key,acknowledgement FROM dispatch_additions
+        WHERE parent=? AND required ORDER BY key""", (parent,)).fetchall()
+    unresolved = [row["key"] for row in rows if not row["acknowledgement"]]
+    if unresolved:
+        raise ValueError("Required handoffs await worker acknowledgement: " + ", ".join(unresolved))
+    if {row["key"] for row in rows} != set(covered):
+        raise ValueError("Supply coverage for exactly these required handoffs: " +
+                         (", ".join(row["key"] for row in rows) or "none"))
 
 
 def run(db, args, root, bot):
@@ -219,7 +284,8 @@ def run(db, args, root, bot):
         raise ValueError(f"Unknown dispatch: {key}")
     record = dict(row)
     if action == "show":
-        added = [dict(row) for row in db.execute("""SELECT key,requirement,handoff FROM dispatch_additions
+        added = [dict(row) for row in db.execute("""SELECT key,requirement,handoff,required,acknowledgement,
+            acknowledgement_turn,send_denial FROM dispatch_additions
             WHERE parent=? ORDER BY key""", (key,))]
         if added:
             record["additions"] = added
@@ -231,10 +297,15 @@ def run(db, args, root, bot):
         required = ("reserved",)
         state = "running"
     elif action == "report":
+        check_required_additions(db, key, args.covers)
         changes = {"report": args.evidence}
         required = ("running",)
         state = "reported"
     elif action == "review":
+        if args.decision == "accept":
+            check_required_additions(db, key, args.verified)
+        elif args.verified:
+            raise ValueError("--verified applies only to acceptance")
         state = {"accept": "accepted", "reject": "rejected"}[args.decision]
         changes = {"decision": state, "review": args.evidence}
         required = ("reported",)
