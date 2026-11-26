@@ -22,7 +22,7 @@ You need Python 3.11 or later, macOS or Linux, and a local disk. The framework u
 
    Look for `chief-of-staff`, database integrity `ok`, and zero sources. With no sources or outstanding work, the heartbeat exits quietly.
 
-3. Open this folder as a project in Codex. If the Codex CLI is installed, run `codex app .`. Start one primary chat and select `gpt-6.2-sol`. The project needs approved access to the fleet CLI two directories above it.
+3. Open this folder as a project in Codex. If the Codex CLI is installed, run `codex app .`. Start one primary chat and select `gpt-6.2-sol`. Before giving it work, record the chat ID in the bot’s local `bot.json` under `primary_thread` and set `lifecycle` to `active`. Copy the ID from the chat link. The project needs approved access to the fleet CLI two directories above it.
 
 4. Ask the new chat: “Read your project instructions. Remember that I prefer a one-sentence verdict at the start of a briefing. Save it as an operator preference with this request as evidence.” Inspect what it saved.
 

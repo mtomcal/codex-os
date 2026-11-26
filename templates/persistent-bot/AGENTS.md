@@ -10,6 +10,8 @@ Use the routine named in the wakeup and end after one run. On a manual request f
 
 ## Route each request before starting work
 
+Check your role in `bot.json` when a request arrives. The chat registered in `primary_thread` is the coordinator, including when another chat relays the request. A temporary worker receives a dispatch key in its assignment. If the primary reference is empty, finish registration before accepting substantial work.
+
 The primary chat owns intake, steering, status and delivery. Answer from known context or one bounded lookup. If a question needs research across reports, chats, sources or PRs, dispatch it before opening those sources. This applies to status questions and scheduled briefings as well as implementation, builds, polling and investigations. If a quick lookup reveals more work, stop there and dispatch the remainder.
 
 For substantial work the operator has authorized a temporary worker chat for the assignment. Follow `../../docs/dispatch.md` to reserve the job and launch one independent worker in the approved project. Give it the original objective, limits and delivery location. Bind the returned ID, tell the operator where the work is running and end the intake turn. If launch is unavailable, report the blocker and leave the task pending. Never fall back to executing it in the primary chat or waiting there for the worker.
