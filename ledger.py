@@ -7,6 +7,8 @@ import re
 import stat
 from datetime import datetime, timezone
 
+import permission_plan
+
 
 WORK = {
     "proposed": {"ready", "parked", "unknown"},
@@ -82,6 +84,7 @@ def install(db):
     ]
     for statement in statements:
         db.execute(statement)
+    permission_plan.install(db)
 
 
 def commands(subparsers):
@@ -89,6 +92,11 @@ def commands(subparsers):
         actions = subparsers.add_parser(kind, help=f"Maintain the {kind} registry").add_subparsers(dest="action", required=True)
         actions.add_parser("list", help="Show up to 50 records, including parked and closed work")
         actions.add_parser("show").add_argument("id", type=identifier)
+        if kind == "workload":
+            permissions = actions.add_parser("permissions", help="Review or record a workload's permission plan")
+            permissions.add_argument("id", type=identifier)
+            permissions.add_argument("--plan", metavar="JSON")
+            permissions.add_argument("--decisions", metavar="JSON")
         add = actions.add_parser("add")
         change = actions.add_parser("update")
         for op in (add, change):
@@ -127,6 +135,8 @@ def commands(subparsers):
     resolve.add_argument("--latest", type=int, required=True, help="Latest known revision for optimistic concurrency")
     resolve.add_argument("--source", type=prose, required=True)
     resolve.add_argument("--evidence", type=prose, required=True, help="Evidence used to resolve the contradiction")
+    for operation in (add, resolve):
+        operation.add_argument("--quiet", action="store_true", help="Capture during an ordinary turn with operator opt-in")
     fb = subparsers.add_parser("feedback")
     fb.add_argument("id", type=identifier)
     fb.add_argument("--subject", type=prose, required=True)
@@ -189,7 +199,16 @@ def registry(db, args, bot):
     if args.action == "list":
         return inventory(db, kind)
     if args.action == "show":
-        return with_observation(db, item(db, kind, args.id))
+        record = with_observation(db, item(db, kind, args.id))
+        return permission_plan.annotate(db, kind, args.id, record) if kind == "workload" else record
+    if args.action == "permissions":
+        current = item(db, kind, args.id)
+        if args.plan is not None:
+            permission_plan.add(db, kind, args.id, args.plan,
+                                allow_new=current["state"] not in {"running", "completed"})
+        if args.decisions is not None:
+            permission_plan.decide(db, kind, args.id, args.decisions)
+        return permission_plan.read(db, kind, args.id)
     fields = ("title", "objective", "owner", "criteria", "origin", "project", "agent", "source", "workload",
               "dependency", "blocker", "milestone", "next_action", "due", "review", "human")
     values = {key: getattr(args, key) for key in fields if getattr(args, key) is not None}
@@ -226,6 +245,10 @@ def registry(db, args, bot):
         if args.state and args.state != current["state"]:
             if args.state not in STATES[kind][current["state"]]:
                 raise ValueError(f"invalid transition from {current['state']} to {args.state}")
+            if kind == "workload" and args.state == "running":
+                status = permission_plan.read(db, kind, args.id)["status"]
+                if status != "ready":
+                    raise ValueError(f"Required workload permissions are {status}")
             values["state"] = args.state
             if args.state in ("completed", "failed"):
                 if "criteria" in values and values["criteria"] != current["criteria"]:
@@ -301,12 +324,22 @@ def strategic(db):
     return rows or None
 
 
-def memory(db, args):
+def preferences(db):
+    return [dict(row) for row in db.execute("""SELECT key,content,source,evidence,rev
+        FROM ledger_memory WHERE category='preference' AND source='operator'
+        AND status='active' AND (expires IS NULL OR expires>?)
+        ORDER BY verified DESC,key LIMIT 100""", (now(),))]
+
+
+def memory(db, args, bot):
+    if getattr(args, "quiet", False):
+        manifest = json.loads((bot / "bot.json").read_text(encoding="utf-8"))
+        if manifest.get("memory", {}).get("quiet") != "approved":
+            raise ValueError("Quiet memory requires explicit operator approval")
+        if args.action == "add" and args.category not in {"preference", "fact", "lesson"}:
+            raise ValueError("Quiet memory captures preferences, facts and lessons")
     if args.action == "preferences":
-        return [dict(row) for row in db.execute("""SELECT key,content,source,evidence,rev
-            FROM ledger_memory WHERE category='preference' AND source='operator'
-            AND status='active' AND (expires IS NULL OR expires>?)
-            ORDER BY verified DESC,key LIMIT 100""", (now(),))]
+        return preferences(db)
     if args.action == "list":
         return [dict(r) for r in db.execute("""SELECT * FROM ledger_memory
             WHERE (? OR status!='archived') AND (? IS NULL OR key=?) ORDER BY key,rev DESC LIMIT 100""",
@@ -369,7 +402,7 @@ def run(db, args, root, bot):
     if args.command == "strategic":
         return strategic(db)
     if args.command == "memory":
-        return memory(db, args)
+        return memory(db, args, bot)
     if args.command == "feedback":
         old = db.execute("SELECT * FROM ledger_feedback WHERE id=?", (args.id,)).fetchone()
         if old:

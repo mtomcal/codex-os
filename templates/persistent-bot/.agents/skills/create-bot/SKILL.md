@@ -1,12 +1,10 @@
 ---
 name: create-bot
-description: Use when the operator asks the Chief of Staff to create or resume provisioning a persistent specialist.
+description: Guide the operator through confirming a new persistent specialist's job, preferences, and permissions, then provision its Codex project.
 ---
 
-# Create bot
+# Create a specialist
 
-Choose a stable lowercase ID, a display name and a one-sentence mission. From the Chief of Staff project run `python3 ../../codexos.py create-bot ID --name NAME --mission MISSION`, passing each value as one shell argument. Reuse an existing proposal by ID. Review the proposed manifest with the operator.
+Use the guided setup in [the fleet guide](../../../../../docs/fleet.md). Run the steps in order and skip questions the operator already answered. Wait for approval of the complete summary before creating the project. When the operator confirms they added the exact project folder, resume the desktop check with the saved bot ID. Follow the returned pending action. Report full onboarding only when the check returns `ready`.
 
-With the operator's authorization to provision the bot, run the desktop check in `../../docs/fleet.md`. If the check returns `waiting_for_registration`, give the operator the exact folder and ask them to add it using the Codex project picker. End the turn with the bot pending. Resume with the same ID when the operator confirms registration. Follow the returned action for a pending or failed startup. Report completion and share the main chat link only after the check returns `active`.
-
-Get separate authorization for new sources or schedule activation.
+Confirm whether the bot needs a heartbeat. If it does, offer every 15 minutes and confirm the cadence, operating window, and time zone. Record the approved manual, scheduled, and event-driven routines or an explicit empty plan. For scheduled and event-driven work, use one delegated heartbeat. Confirm the local timing, catch-up window, and scope of the work it assigns. For a manual-only bot, skip the scheduling questions. Include the choice in the approval summary and use the approved setup file on retries. Schedule activation requires separate authorization.
