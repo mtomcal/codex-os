@@ -71,6 +71,8 @@ def main(argv=None, root=ROOT):
                     "sources": db.execute("SELECT count(*) FROM monitor_sources").fetchone()[0]}
         if args.command == "dispatch":
             return dispatch.run(db, args, root, bot)
+        if args.command == "provision-bot":
+            return fleet.provision(db, args, root, bot)
         if args.command == "briefing":
             return briefing(db, args.period)
         if args.command == "heartbeat":

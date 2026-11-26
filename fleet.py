@@ -17,6 +17,7 @@ SEEDS = (
      "Compare measurements from approved evaluation runs. Report regressions, repeated plateaus and improvements with the run references.", CHIEF),
 )
 IDENTIFIER = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+THREAD_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 CADENCE = {
     "heartbeat": "Every 30 minutes during agreed weekday working hours",
     "morning-briefing": "Start of each working day",
@@ -40,6 +41,12 @@ def commands(subparsers):
     create.add_argument("id", help="Lowercase identifier, e.g. delivery-tracker")
     create.add_argument("--name", required=True)
     create.add_argument("--mission", required=True)
+    provision = subparsers.add_parser("provision-bot", help="Record local state for desktop bot provisioning")
+    provision.add_argument("id")
+    operations = provision.add_mutually_exclusive_group()
+    operations.add_argument("--reserve", action="store_true")
+    operations.add_argument("--remember", metavar="CHAT_ID")
+    operations.add_argument("--activate", metavar="VERIFIED_CHAT_ID")
     subparsers.add_parser("fleet-list", help="List local project definitions")
     mail = subparsers.add_parser("mailbox", help="Exchange bounded assignments and evidence")
     actions = mail.add_subparsers(dest="mail_action", required=True)
@@ -151,6 +158,51 @@ def run(db, args, root, bot):
             raise ValueError("Create a specialist from the Chief of Staff project")
         return _create(root, args.id, args.name, args.mission, CHIEF)
     raise ValueError(f"Unknown fleet command: {args.command}")
+
+
+def provision(db, args, root, chief):
+    if chief != root / "bots" / CHIEF:
+        raise ValueError("Provision specialists from the Chief of Staff project")
+    _validate_id(args.id)
+    project = chief.parent / args.id
+    bot = _record(project)
+    if bot.get("parent") != CHIEF or bot.get("lifecycle") not in {"proposed", "active"}:
+        raise ValueError("Select a proposed or active specialist belonging to this chief")
+
+    db.execute("""CREATE TABLE IF NOT EXISTS bot_provisioning (
+        bot TEXT PRIMARY KEY, candidate TEXT, verified INTEGER NOT NULL DEFAULT 0)""")
+    attempt = db.execute("SELECT candidate, verified FROM bot_provisioning WHERE bot=?", (args.id,)).fetchone()
+    candidate = attempt["candidate"] if attempt else None
+    primary = bot.get("primary_thread")
+    verified = bool(primary and candidate == primary and attempt["verified"])
+    thread = primary or candidate
+    launch = False
+    if args.reserve and not (attempt or thread) and bot["lifecycle"] == "proposed":
+        db.execute("INSERT INTO bot_provisioning (bot) VALUES (?)", (args.id,))
+        attempt = True
+        launch = True
+    if args.remember is not None:
+        if not THREAD_ID.fullmatch(args.remember) or (thread and thread != args.remember):
+            raise ValueError("The candidate chat ID is invalid or conflicts with the recorded chat")
+        db.execute("""INSERT INTO bot_provisioning (bot, candidate) VALUES (?, ?)
+            ON CONFLICT (bot) DO UPDATE SET candidate=excluded.candidate""", (args.id, args.remember))
+        thread = args.remember
+        attempt = True
+    if args.activate is not None:
+        if not THREAD_ID.fullmatch(args.activate) or args.activate != thread:
+            raise ValueError("The verified chat must match the recorded candidate or binding")
+        if bot["lifecycle"] == "proposed":
+            bot.update(primary_thread=thread, lifecycle="active")
+            with tempfile.TemporaryDirectory(dir=project, prefix=".provision-") as scratch:
+                manifest = Path(scratch) / "bot.json"
+                manifest.write_text(json.dumps(bot, indent=2) + "\n", encoding="utf-8")
+                manifest.replace(project / "bot.json")
+        db.execute("""INSERT INTO bot_provisioning (bot, candidate, verified) VALUES (?, ?, 1)
+            ON CONFLICT (bot) DO UPDATE SET candidate=excluded.candidate, verified=1""", (args.id, thread))
+        verified = True
+    return {"project": str(project), "name": bot["name"], "lifecycle": bot["lifecycle"],
+            "primary_thread": bot.get("primary_thread"), "candidate": thread, "verified": verified, "launch": launch}
+
 
 def _mailbox(args, root, bot):
     sender = bot.name

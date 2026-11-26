@@ -1,0 +1,125 @@
+// Run in the desktop code-mode tool runtime with the Chief of Staff project as workdir.
+(async function provisionBot(tools, workdir, id, {approveManifestWrite = false} = {}) {
+    if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id) || id.length > 64)
+        throw Error("Select a valid specialist bot ID");
+
+    async function cli(flag, chatId) {
+        if (chatId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(chatId))
+            throw Error("Invalid native chat ID");
+        const cmd = ["python3 ../../codexos.py provision-bot", id, flag, chatId].filter(Boolean).join(" ");
+        const approval = flag === "--activate" && approveManifestWrite ? {
+            sandbox_permissions: "require_escalated",
+            justification: "May I save the verified main chat and active status in this specialist's local bot manifest?",
+        } : {};
+        let result = await tools.exec_command({cmd, workdir, ...approval});
+        let output = result.output;
+        while (result.session_id && result.exit_code == null) {
+            result = await tools.write_stdin({session_id: result.session_id, chars: ""});
+            output += result.output;
+        }
+        if (result.exit_code !== 0) throw Error(output.trim() || "Fleet command failed");
+        return JSON.parse(output);
+    }
+    async function native(operation, args) {
+        const reply = await tools[operation](args);
+        if (reply.isError) throw Error("Native Codex operation failed: " + operation);
+        return JSON.parse(reply.content.find(item => item.type === "text").text);
+    }
+
+    let state = await cli();
+    const directory = state.project;
+    const status = (status, action, details = {}) => ({
+        status, lifecycle: state.lifecycle, directory, ...(action ? {action} : {}), ...details,
+    });
+    const projects = (await native("mcp__codex_app__list_projects", {})).projects.filter(project =>
+        project.projectKind === "local" && project.hostId === "local" && project.path === directory);
+    if (projects.length === 0)
+        return status("waiting_for_registration", "Add this exact folder in the Codex project picker, then resume with the same bot ID.");
+    if (projects.length !== 1)
+        return status("ambiguous_project", "Resolve duplicate Codex project registrations for this folder, then resume.");
+
+    const {projectId, hostId} = projects[0];
+    const title = "CodexOS Main - " + id;
+    const command = "python3 ../../codexos.py status";
+    const ready = "CodexOS ready: " + id;
+    const prompt = [
+        "This is the dedicated main chat startup check for CodexOS bot " + id + ".",
+        "From the current project directory, read bot.json, SOUL.md, USER.md, and MEMORY.md.",
+        "Run `" + command + "` as a standalone command from that directory.",
+        "If all four files are readable, the status bot is " + id + ", and integrity is ok, reply exactly: " + ready,
+        "Otherwise report the blocker. Do not change the manifest, configure sources or schedules, or delegate this check.",
+    ].join("\n");
+    async function matches(archived) {
+        const found = [];
+        let cursor;
+        do {
+            const page = await native("mcp__codex_app__list_threads", {mode: "history", hostId, archived, cursor, limit: 50});
+            found.push(...page.threads.filter(chat => chat.kind === "codex" && chat.hostId === hostId &&
+                chat.projectId === projectId && chat.cwd === directory &&
+                (state.candidate ? chat.id === state.candidate : chat.title === title || chat.title === state.name)));
+            cursor = page.nextCursor;
+        } while (cursor);
+        return found;
+    }
+
+    const chats = await matches(false);
+    if (chats.length > 1)
+        return status("ambiguous_main_chat", "Resolve the matching main chats in this project, then resume.");
+    if (chats.length === 0) {
+        if ((await matches(true)).length)
+            return status("main_chat_archived", "Unarchive the existing main chat in this project, then resume.");
+        if (state.candidate)
+            return status("waiting_for_main_chat", "Check that the recorded chat is visible in this project, then resume.",
+                {chatId: state.candidate});
+        state = await cli("--reserve");
+        if (!state.launch)
+            return status("waiting_for_main_chat",
+                "Check Codex for the existing launch. If Codex confirms that launch failed, manually start one chat in this project with the title and prompt below, then resume.",
+                {title, prompt});
+
+        let created;
+        try {
+            created = await native("mcp__codex_app__create_thread", {
+                title, prompt, target: {type: "project", projectId, environment: {type: "local"}},
+            });
+        } catch (error) {
+            return status("launch_unconfirmed", "Check whether Codex started the chat, then resume.",
+                {title, prompt, error: String(error.message || error)});
+        }
+        if (created.threadId && created.hostId === hostId) {
+            await cli("--remember", created.threadId);
+        } else if (!created.clientThreadId) {
+            return status("launch_unconfirmed", "Check the chat's project and host before resuming.", {title, prompt});
+        }
+        return status("waiting_for_startup", "Resume once Codex finishes the main chat startup check.");
+    }
+
+    const chatId = chats[0].id;
+    const detail = await native("mcp__codex_app__read_thread", {threadId: chatId, hostId, itemLimit: 100});
+    if (detail.thread?.id !== chatId || detail.thread.kind !== "codex" ||
+        detail.thread.hostId !== hostId || detail.thread.cwd !== directory)
+        return status("main_chat_mismatch", "Check the main chat's project and working directory before resuming.", {chatId});
+    if (state.lifecycle === "active" && state.verified) return status("active", null, {chatId});
+
+    const turn = detail.turns?.[0];
+    if (detail.thread.status?.type === "active" || turn?.status === "inProgress")
+        return status("waiting_for_startup", "Resume when the main chat's startup turn finishes.", {chatId});
+
+    const items = turn?.items ?? [];
+    const requested = items.some(item => item.type === "userMessage" &&
+        item.content?.some(part => part.type === "text" && part.text === prompt));
+    const ranStatus = items.some(item => item.type === "commandExecution" && item.cwd === directory &&
+        [command, "'" + command + "'", '"' + command + '"'].includes(
+            item.command?.replace(/^(?:\S+\/)?(?:sh|bash|zsh) -lc /, "")) &&
+        item.status === "completed" && item.exitCode === 0);
+    const answer = items.findLast(item => item.type === "agentMessage" && item.phase === "final_answer");
+    if (turn?.status !== "completed" || !requested || !ranStatus || answer?.text?.trim() !== ready)
+        return status("verification_required", "Resolve the startup blocker, then submit this startup prompt in the same chat and resume.",
+            {chatId, prompt});
+
+    if (!state.candidate) await cli("--remember", chatId);
+    state = await cli("--activate", chatId);
+    if (state.lifecycle !== "active" || state.primary_thread !== chatId || !state.verified)
+        throw Error("The fleet CLI did not confirm activation");
+    return status("active", null, {chatId: state.primary_thread});
+})
