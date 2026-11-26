@@ -11,7 +11,7 @@ import grade_notification
 
 class WorkerArchiveTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is required to replay the desktop JavaScript adapter")
-    def test_heartbeat_recovers_lost_archive_receipt(self):
+    def test_heartbeat_recovers_missed_notifications_and_lost_archive_receipts(self):
         subprocess.run(["node", str(Path(__file__).with_name("check_heartbeat.js"))], check=True)
 
     def test_dispatch_requires_archived_worker(self):
