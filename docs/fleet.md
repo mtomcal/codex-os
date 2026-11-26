@@ -72,9 +72,17 @@ When the check returns `schedule_binding_pending`, record the binding from the b
 python3 ../../codexos.py schedule bind --automation AUTOMATION_ID --project PROJECT_ID --chat CHAT_ID --plan REVISION --approval 'Operator authorization reference'
 ```
 
-Record `first_turn` and `first_review` after the approved automation runs. The check matches the automation ID and exact prompt in native history, the worker dispatcher marker, and the first durable tick recorded during that turn. Reuse the same schedule on resume. A changed worker scope, routine file or skill changes the plan revision and requires renewed review before dispatch.
+Record `first_turn` and `first_review` after the approved automation completes a usable tick. The check matches the automation ID, exact prompt, dispatcher marker, and tick completion timestamp against that native turn. Reuse the same schedule on resume. A changed worker scope, routine file or skill changes the plan revision and requires renewed review before dispatch.
 
-From an authorized producer or operator workflow, record event readiness using `python3 ../../codexos.py schedule ready ROUTINE EVENT --evidence REFERENCE`. Reuse the same stable event ID on retry. The dispatcher claims at most three workers and allows one active occurrence per routine. After a confirmed interruption before work starts it can try again. It marks an uncertain launch or worker effect for review. Use the primary state snapshot to inspect the receipt. After confirming the outcome, run `schedule review OCCURRENCE --revision REVISION --decision done|retry|cancel --evidence REFERENCE`. Only authorize retry after verifying the previous worker stopped and repeating the action is safe.
+From an authorized producer or operator workflow, record event readiness using `python3 ../../codexos.py schedule ready ROUTINE EVENT --evidence REFERENCE`. Reuse the event ID on retry. A revised approval carries unclaimed events forward for routines still configured for events. The same event ID preserves the outcome of any previous execution attempt.
+
+The dispatcher claims at most three workers and allows one active occurrence per routine. It checks native history for queued or interrupted launches before acting on an overdue claim. A confirmed interruption before work starts can trigger an automatic retry. An unconfirmed launch or uncertain effect requires review.
+
+Read pending occurrence and attempt updates with `state snapshot --chat CHAT_ID`. For each continuation, pass the preceding page's `next_after` to `--after` and its `revision` to `--revision`. Start a new snapshot if the revision changes. After the last page, acknowledge the revision with `state ack --chat CHAT_ID --revision REVISION`.
+
+For an occurrence under review, verify the outcome and record it with `schedule review OCCURRENCE --revision REVISION --decision done|retry|cancel --evidence REFERENCE`. Authorize retry only after verifying that the previous worker stopped and that repeating the action is safe.
+
+Inspect retained attempt identities and receipts with `schedule attempts OCCURRENCE`. After confirming a worker ended and verifying its outcome, record the review with `schedule review-attempt OCCURRENCE WORKER ATTEMPT --evidence REFERENCE`. Post the result in the primary chat, then record delivery with `schedule delivered-attempt OCCURRENCE WORKER ATTEMPT --evidence REFERENCE`. The desktop heartbeat checks the same idle worker and terminal turn before archiving. It records cleanup after it confirms the worker in native archived history.
 
 To include the legacy monitor and dispatch reconciliation as a delegated workload, put the approved operational steps in a workload routine. Run the desktop heartbeat adapter from that worker with `{operations: true}` as its third argument. This collects the usual findings, commitments, mailbox and dispatch updates within that routine's scope.
 

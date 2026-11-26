@@ -18,11 +18,11 @@ const chatId = "11111111-1111-4111-8111-111111111111";
 const sourceChatId = "22222222-2222-4222-8222-222222222222";
 
 const typedPrompt = text => ({type: "userMessage", content: [{type: "text", text}]});
-function nativeLaunch(prompt) {
+function nativeLaunch(prompt, source = sourceChatId) {
     return {
         type: "functionCallOutput", namespace: "codex_app", name: "create_thread",
         output: {
-            text: `<codex_delegation>\n  <source_thread_id>${sourceChatId}</source_thread_id>\n  <input>${prompt}</input>\n</codex_delegation>`,
+            text: `<codex_delegation>\n  <source_thread_id>${source}</source_thread_id>\n  <input>${prompt}</input>\n</codex_delegation>`,
             truncated: false,
         },
     };
@@ -162,16 +162,37 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
         const output = execFileSync(python, [...pythonArgs, ...args], {...options(), stdio: "pipe"});
         return output.trim() ? JSON.parse(output) : null;
     };
-    const snapshot = () => runCLI("state", "snapshot", "--chat", chatId);
+    const snapshot = (...args) => runCLI("state", "snapshot", "--chat", chatId, ...args);
+    const continueSnapshot = (page, after = page.next_after) =>
+        snapshot("--after", String(after), "--revision", String(page.revision));
+    function observeAll() {
+        let page = snapshot();
+        while (page.next_after !== null) page = continueSnapshot(page);
+        return page;
+    }
     const ack = rev => runCLI("state", "ack", "--chat", chatId, "--revision", String(rev));
     const launches = [];
     const ends = new Map();
+    const archivedWorkers = new Set();
+    const archiveCalls = [];
+    let archiveVisible = true;
+    let launchMode = "ready";
+    let failedCommand;
+    let hiddenWorker;
+    let conflictingChats = [];
     let denyLaunch = false;
     let nativeProject = dispatcher.project;
     const desktop = {
         async exec_command({cmd, workdir}) {
             assert.equal(workdir, projectDir);
-            const args = cmd.split(" ").slice(2).map(arg => arg === "'project'" ? projectId : arg);
+            const args = cmd.split(" ").slice(2).map(arg => {
+                if (arg === "'project'") return projectId;
+                return arg.replace(/^--client='([^']*)'$/, "--client=$1");
+            });
+            if (args.slice(0, 2).join(" ") === failedCommand) {
+                failedCommand = undefined;
+                return {exit_code: 1, output: "Fixture transient CLI failure"};
+            }
             const result = await promisify(execFile)(python, [...pythonArgs, ...args], options());
             return {exit_code: 0, output: result.stdout};
         },
@@ -183,11 +204,48 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
             assert.match(title, new RegExp(occurrence));
             const worker = "22222222-2222-4222-8222-" + String(launches.length + 1).padStart(12, "0");
             assert.notEqual(worker, chatId);
-            launches.push({worker, occurrence, token});
+            const client = "client:" + launches.length;
+            launches.push({worker, occurrence, token, title, prompt, client});
+            if (launchMode === "queued") {
+                hiddenWorker = worker;
+                return reply({clientThreadId: client});
+            }
             return reply({threadId: worker, hostId});
+        },
+        async mcp__codex_app__list_threads({mode, hostId: host, archived, cursor}) {
+            assert.equal(mode, "history");
+            assert.equal(host, hostId);
+            if (archived) return reply({threads: []});
+            if (!cursor) return reply({threads: [], nextCursor: "next"});
+            return reply({threads: [...launches.filter(job => job.worker !== hiddenWorker).map(job => ({
+                id: job.worker, title: job.title, kind: "codex", projectId, cwd: projectDir, hostId,
+            })), ...conflictingChats]});
+        },
+        async mcp__codex_app__read_thread({threadId, hostId: host, includeOutputs}) {
+            assert.equal(host, hostId);
+            assert.equal(includeOutputs, true);
+            const job = launches.find(job => job.worker === threadId);
+            const other = conflictingChats.find(chat => chat.id === threadId);
+            assert.ok(job || other);
+            return reply({
+                thread: {id: threadId, kind: "codex", cwd: projectDir, hostId},
+                turns: [{items: [nativeLaunch(job?.prompt ?? other.prompt, other?.source ?? chatId)]}],
+            });
+        },
+        async mcp__codex_app__list_archived_threads({hostId: host}) {
+            assert.equal(host, hostId);
+            return reply({threads: archiveVisible ? [...archivedWorkers].map(id => ({id, hostId})) : []});
+        },
+        async mcp__codex_app__set_thread_archived({threadId, hostId: host, archived}) {
+            assert.equal(host, hostId);
+            assert.ok(archived && ends.has(threadId));
+            archiveCalls.push(threadId);
+            archivedWorkers.add(threadId);
+            return reply({});
         },
         async mcp__codex_app__wait_threads({targets, timeoutMs}) {
             assert.equal(timeoutMs, 0);
+            assert.ok(targets.length <= 8);
             return reply({polls: targets.map(({threadId}) => ends.has(threadId) ? {
                 thread: {id: threadId, hostId, status: {type: "idle"}},
                 latestTurn: {id: "fixture-terminal", status: ends.get(threadId), completedAt: clock},
@@ -198,8 +256,9 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.equal(await pulse(), null);
     assert.equal(launches.length, 0);
     assert.throws(() => runCLI("schedule", "ready", "arrival", "premature", "--evidence", "fixture"), /approve and verify/i);
-    const bind = automation => runCLI("schedule", "bind", "--automation", automation, "--project", projectId,
-        "--chat", chatId, "--plan", proposal.revision, "--approval", saved.approval);
+    const bind = (automation, revision = proposal.revision) =>
+        runCLI("schedule", "bind", "--automation", automation, "--project", projectId,
+            "--chat", chatId, "--plan", revision, "--approval", saved.approval);
     bind(saved.id);
     bind(saved.id);
     assert.throws(() => bind("duplicate-heartbeat"), /different native schedule/);
@@ -208,7 +267,22 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     nativeProject = {...nativeProject, projectId: "wrong"};
     await assert.rejects(pulse, /approved native registration/);
     nativeProject = dispatcher.project;
+    const priorWorker = "44444444-4444-4444-8444-444444444444";
+    runCLI("schedule", "ready", "arrival", "first-run-fixture", "--evidence", "fixture source");
+    const {work: [prior]} = runCLI("schedule", "tick", "--automation", saved.id,
+        "--project", projectId, "--chat", chatId);
+    runCLI("schedule", "bind-worker", prior.id, priorWorker, prior.token);
+    runCLI("schedule", "start", prior.id, prior.token);
+    runCLI("schedule", "finish", prior.id, prior.token, "--decision", "done", "--evidence", "fixture receipt");
+    ends.set(priorWorker, "completed");
+    const failedTickAt = clock;
+    failedCommand = "schedule terminal";
+    await assert.rejects(pulse, /Fixture transient CLI failure/);
+    assert.equal(runCLI("schedule", "status").first_usable_tick, null);
+    assert.equal(runCLI("schedule", "attempts", prior.id)[0].terminal, null);
+    advance("2026-11-27T23:50:00Z");
     assert.deepEqual(await pulse(), {first_tick: true});
+    assert.equal(runCLI("schedule", "attempts", prior.id)[0].terminal, "completed");
     const marker = proposal.scheduledPrompt.match(/CodexOS heartbeat verified: [^\n]+/)[0];
     Object.assign(saved, {first_turn: "dispatcher-first-run", first_review: "reviewed ledger tick"});
     saveDispatcher(proposal);
@@ -224,6 +298,11 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     dispatcher.plan.routineTurns.push(nativeTick);
     assert.equal((await dispatcher.run()).status, "first_run_pending");
     nativeTick.items[0].output.text = nativeTick.items[0].output.text.replace(">wrong<", ">" + saved.id + "<");
+    nativeTick.startedAt = failedTickAt - 1;
+    nativeTick.completedAt = failedTickAt + 1;
+    assert.equal((await dispatcher.run()).status, "first_run_pending");
+    nativeTick.startedAt = clock - 1;
+    nativeTick.completedAt = clock + 1;
     assert.equal((await dispatcher.run()).status, "ready");
     assert.equal((await dispatcher.run()).status, "ready");
     assert.equal(dispatcher.plan.launchCount, 1);
@@ -247,7 +326,7 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.deepEqual(finish(arrival), {state: "done"});
     assert.deepEqual(finish(arrival), {state: "done"});
     assert.throws(() => ack(old.revision), /reload the primary snapshot/i);
-    const restarted = snapshot();
+    const restarted = observeAll();
     assert.ok(restarted.revision > old.revision);
     assert.ok(restarted.pending.some(change => change.subject === event));
     assert.equal(restarted.occurrences.find(row => row.id === event).receipt, "verified private receipt");
@@ -256,6 +335,41 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.throws(() => ack(old.revision), /reload the primary snapshot/i);
     assert.throws(() => ack(restarted.revision + 1), /reload the primary snapshot/i);
 
+    const attemptOf = (job, attempt) => snapshot().attempts.find(
+        row => row.id === job.occurrence && row.attempt === attempt);
+    const reviewAttempt = (job, attempt) => runCLI("schedule", "review-attempt", job.occurrence,
+        job.worker, String(attempt), "--evidence", "verified attempt result");
+    const deliverAttempt = (job, attempt) => runCLI("schedule", "delivered-attempt", job.occurrence,
+        job.worker, String(attempt), "--evidence", "result posted to primary");
+    assert.throws(() => reviewAttempt(arrival, 1), /confirm the worker ended/i);
+    await pulse();
+    assert.deepEqual(archiveCalls, []);
+    ends.set(arrival.worker, "completed");
+    await pulse();
+    assert.equal(attemptOf(arrival, 1).terminal, "completed");
+    assert.equal(attemptOf(arrival, 1).outcome, "verified private receipt");
+    assert.throws(() => deliverAttempt(arrival, 1), /review and delivery/i);
+    reviewAttempt(arrival, 1);
+    await pulse();
+    assert.deepEqual(archiveCalls, []);
+    deliverAttempt(arrival, 1);
+    ends.delete(arrival.worker);
+    await pulse();
+    assert.deepEqual(archiveCalls, []);
+    ends.set(arrival.worker, "completed");
+    archiveVisible = false;
+    await pulse();
+    assert.deepEqual(archiveCalls, [arrival.worker]);
+    assert.equal(attemptOf(arrival, 1).archived, null);
+    archiveVisible = true;
+    await pulse();
+    assert.deepEqual(archiveCalls, [arrival.worker]);
+    assert.equal(attemptOf(arrival, 1), undefined);
+    const [archivedAttempt] = runCLI("schedule", "attempts", event);
+    assert.equal(archivedAttempt.worker, arrival.worker);
+    assert.equal(archivedAttempt.archived, clock);
+    assert.ok(archivedAttempt.reviewed && archivedAttempt.delivered);
+
     ends.set(weekly.worker, "interrupted");
     await pulse();
     await pulse();
@@ -263,11 +377,19 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     const retried = launches[2];
     assert.equal(retried.occurrence, weekly.occurrence);
     assert.notEqual(retried.token, weekly.token);
+    assert.equal(attemptOf(weekly, 1).worker, weekly.worker);
+    assert.equal(attemptOf(weekly, 1).terminal, "interrupted");
+    assert.equal(attemptOf(retried, 2).worker, retried.worker);
+    assert.throws(() => reviewAttempt(retried, 1), /does not match/i);
+    reviewAttempt(weekly, 1);
+    deliverAttempt(weekly, 1);
+    await pulse();
+    assert.deepEqual(archiveCalls, [arrival.worker, weekly.worker]);
     assert.throws(() => start(weekly), /claim changed/i);
     assert.equal(start(retried).start, true);
     ends.set(retried.worker, "failed");
     assert.deepEqual(await pulse(), {occurrences_to_review: [retried.occurrence]});
-    const stale = snapshot();
+    const stale = observeAll();
     denyLaunch = true;
     advance("2026-11-28T03:00:00Z");
     const deniedEvent = ready("source-2").id;
@@ -275,10 +397,12 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.equal(launches.length, 3);
     assert.throws(() => runCLI("schedule", "review", retried.occurrence, "--revision", String(stale.revision),
         "--decision", "retry", "--evidence", "stale review"), /reload the primary snapshot/i);
-    const reviewState = snapshot();
+    const reviewState = observeAll();
     runCLI("schedule", "review", retried.occurrence, "--revision", String(reviewState.revision),
         "--decision", "cancel", "--evidence", "verified failed worker");
     advance("2026-11-30T23:30:00Z");
+    assert.equal(await pulse(), null);
+    advance("2026-12-01T00:31:00Z");
     const failure = await pulse();
     assert.equal(failure.occurrences_to_review.length, 2);
     assert.ok(failure.occurrences_to_review.includes(deniedEvent));
@@ -291,6 +415,102 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     dispatcher.saveManifest({...savedManifest, max_delegation_depth: 0});
     assert.equal(await pulse(), null);
     dispatcher.saveManifest(savedManifest);
+
+    const resolve = (id, decision) => runCLI("schedule", "review", id, "--revision", String(observeAll().revision),
+        "--decision", decision, "--evidence", "verified occurrence disposition");
+    assert.throws(() => resolve(deniedEvent, "retry"), /confirmed terminal worker/i);
+    resolve(deniedEvent, "cancel");
+    denyLaunch = false;
+    launchMode = "queued";
+    ready("queued-event");
+    await pulse();
+    const queued = launches.at(-1);
+    assert.equal(attemptOf(queued, 1).client, queued.client);
+    assert.equal(attemptOf(queued, 1).worker, null);
+    const conflicting = (suffix, overrides) => ({
+        id: "33333333-3333-4333-8333-00000000000" + suffix,
+        title: queued.title, kind: "codex", projectId, cwd: projectDir, hostId, prompt: queued.prompt, ...overrides,
+    });
+    conflictingChats = [
+        conflicting(1, {projectId: "another-project"}),
+        conflicting(2, {hostId: "another-host"}),
+        conflicting(3, {prompt: weekly.prompt}),
+        conflicting(4, {source: sourceChatId}),
+        conflicting(5, {clientThreadId: "another-queued-reference"}),
+    ];
+    await pulse();
+    assert.equal(attemptOf(queued, 1).worker, null);
+    assert.equal(launches.length, 4);
+    hiddenWorker = undefined;
+    await pulse();
+    assert.equal(attemptOf(queued, 1).worker, queued.worker);
+    assert.equal(start(queued).start, true);
+    assert.equal(start(queued).start, false);
+    assert.equal(finish(queued).state, "done");
+    assert.equal(launches.length, 4);
+
+    launchMode = "ready";
+    ready("interrupted-launch");
+    failedCommand = "schedule bind-worker";
+    await assert.rejects(pulse, /Fixture transient CLI failure/);
+    const interrupted = launches.at(-1);
+    assert.equal(attemptOf(interrupted, 1).worker, null);
+    assert.throws(() => runCLI("schedule", "bind-worker", interrupted.occurrence, weekly.worker, weekly.token), /claim changed/i);
+    await pulse();
+    assert.equal(attemptOf(interrupted, 1).worker, interrupted.worker);
+    assert.equal(launches.length, 5);
+    assert.equal(start(interrupted).start, true);
+    ends.set(interrupted.worker, "failed");
+    await pulse();
+    assert.equal(attemptOf(interrupted, 1).terminal, "failed");
+
+    const carried = ready("pending-across-approval").id;
+    // Leave the operating window while editing and reapproving the same workload.
+    advance("2026-12-01T01:05:00Z");
+    const routineFile = join(projectDir, "routines/arrival.md");
+    writeFileSync(routineFile, "Exercise the revised disposable workload.\n");
+    const planRevision = cli("provision-bot", "delegated").onboarding.dispatcher.revision;
+    assert.notEqual(planRevision, proposal.revision);
+    assert.equal(await pulse(), null);
+    bind(saved.id, planRevision);
+    assert.equal(ready("pending-across-approval").id, carried);
+    assert.equal(ready("source-1").id, event);
+    assert.equal(ready("interrupted-launch").id, interrupted.occurrence);
+    await pulse();
+    assert.equal(launches.length, 5);
+    assert.equal(snapshot().occurrences.find(row => row.id === carried).state, "ready");
+    assert.equal(snapshot().occurrences.find(row => row.id === event).state, "done");
+    assert.equal(snapshot().occurrences.find(row => row.id === interrupted.occurrence).state, "review");
+    assert.throws(() => resolve(interrupted.occurrence, "retry"), /current plan/i);
+    resolve(interrupted.occurrence, "cancel");
+    advance("2026-12-04T23:45:00Z");
+    await pulse();
+    assert.equal(launches.length, 6);
+    const revised = launches.at(-1);
+    assert.equal(revised.occurrence, carried);
+    assert.equal(start(revised).start, true);
+    assert.equal(finish(revised).state, "done");
+
+    ack(observeAll().revision);
+    for (let index = 0; index < 43; index++) ready("pagination-" + index);
+    const firstPage = snapshot();
+    assert.equal(firstPage.pending.length, 20);
+    assert.throws(() => ack(firstPage.revision), /was not observed/i);
+    assert.throws(() => continueSnapshot(firstPage, firstPage.revision), /skipped a page/i);
+    assert.throws(() => continueSnapshot(firstPage, firstPage.next_after + 1), /skipped a page/i);
+    const secondPage = continueSnapshot(firstPage);
+    assert.equal(secondPage.pending.length, 20);
+    assert.throws(() => ack(firstPage.revision), /was not observed/i);
+    ready("pagination-superseding-update");
+    assert.throws(() => continueSnapshot(secondPage), /reload the primary snapshot/i);
+    const replacementPage = snapshot();
+    assert.equal(replacementPage.next_after, firstPage.next_after);
+    assert.throws(() => continueSnapshot(firstPage), /reload the primary snapshot/i);
+    const lastPage = continueSnapshot(continueSnapshot(replacementPage));
+    assert.equal(lastPage.pending.length, 4);
+    assert.equal(lastPage.next_after, null);
+    assert.deepEqual(ack(lastPage.revision), {acknowledged: lastPage.revision});
+    assert.equal(snapshot().pending.length, 0);
 }
 
 async function check() {

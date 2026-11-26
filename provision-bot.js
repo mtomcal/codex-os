@@ -193,11 +193,12 @@
                 const input = turn?.items?.[0]?.output?.text;
                 const envelope = input?.match(/^<heartbeat>\n  <automation_id>([^<]+)<\/automation_id>\n  <current_time_iso>[^<]+<\/current_time_iso>\n  <instructions>\n([\s\S]*)\n  <\/instructions>\n<\/heartbeat>\n?$/);
                 const answer = turn?.items?.findLast(item => item.type === "agentMessage" && item.phase === "final_answer");
-                if (!Number.isFinite(binding.first_tick) || !reference(saved.first_review) ||
+                const witnessedTick = [binding.first_usable_tick, binding.first_tick].some(tick =>
+                    Number.isFinite(tick) && Math.floor(tick) >= turn?.startedAt && Math.floor(tick) <= turn?.completedAt);
+                if (!witnessedTick || !reference(saved.first_review) ||
                     !successfulRun(turn, scheduledPrompt, marker, true) ||
                     envelope?.[1] !== saved.id || envelope?.[2] !== scheduledPrompt ||
                     !Number.isFinite(turn.startedAt) || !Number.isFinite(turn.completedAt) ||
-                    Math.floor(binding.first_tick) < turn.startedAt || Math.floor(binding.first_tick) > turn.completedAt ||
                     answer?.text?.trimEnd().split("\n").at(-1) !== marker)
                     return status("first_run_pending", "Verify the first native run and its ledger tick, then record the turn.", details);
             } catch {
