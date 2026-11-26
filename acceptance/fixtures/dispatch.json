@@ -1,0 +1,39 @@
+{
+  "description": "Synthetic overlapping turns for the dispatch grader.",
+  "calibration": "example-durable",
+  "intake": {
+    "thread": "example-primary",
+    "start": 0,
+    "end": 10
+  },
+  "answer": {
+    "thread": "example-primary",
+    "start": 11,
+    "end": 12,
+    "reply": "example-durable, lab-seed"
+  },
+  "worker": {
+    "thread": "example-worker",
+    "start": 5,
+    "end": 21
+  },
+  "delivery": {
+    "thread": "example-primary",
+    "start": 22,
+    "end": 24,
+    "reply": "Verified 42."
+  },
+  "during": {
+    "status": "inProgress"
+  },
+  "ledger": {
+    "worker": "example-worker",
+    "decision": "accepted",
+    "report": "example artifact",
+    "review": "example verification",
+    "cleanup": "example archive receipt",
+    "state": "cleaned"
+  },
+  "archived_id": "example-worker",
+  "result_after_archive": 42
+}

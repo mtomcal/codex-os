@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "idle_control": "Review cadence with operator",
+  "source": "release-eval",
+  "metric": "release suite pass rate",
+  "steps": [
+    {"id":"baseline","revision":1,"score":94,"blockers":[],"expect":[],"outcome":"baseline"},
+    {"id":"regression","expected_change":["release suite pass rate","94","83"],"revision":2,"score":83,"blockers":[],"expect":[{"kind":"regression","revision":2,"evidence":["fixture/run-2"]}],"outcome":"changed"},
+    {"id":"replay-regression","revision":2,"score":83,"blockers":[],"expect":[],"outcome":"unchanged"},
+    {"id":"blocker","revision":3,"score":83,"blockers":["awaiting dataset"],"expect":[{"kind":"attention","revision":3,"evidence":["fixture/run-3"]}],"outcome":"changed"},
+    {"id":"repeated-blocker","revision":4,"score":83,"blockers":["awaiting dataset"],"expect":[],"outcome":"changed"},
+    {"id":"review-quiet-active-check","revision":4,"score":83,"blockers":["awaiting dataset"],"expect":[],"outcome":"unchanged","expected_proposal":null}
+  ]
+}

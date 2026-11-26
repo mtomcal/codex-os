@@ -1,0 +1,116 @@
+{
+  "description": "Synthetic grader input. No live execution.",
+  "expected": {
+    "session": "example-session",
+    "durable": "example-durable",
+    "rule": "example-rule",
+    "footer": "Example reviewed."
+  },
+  "primary_thread": "example-primary",
+  "fresh_thread": "example-fresh",
+  "automation_prompt": "Run the fixture heartbeat.",
+  "durable_db": [
+    {
+      "key": "calibration",
+      "content": "example-durable",
+      "source": "operator",
+      "evidence": "lab-seed"
+    },
+    {
+      "key": "lab-brief-format",
+      "content": "Example reviewed.",
+      "source": "operator",
+      "evidence": "lab-interview"
+    }
+  ],
+  "reflection_receipt": {
+    "calibration": "example-durable",
+    "source": "operator",
+    "evidence": "lab-seed",
+    "feedback": [
+      "lab-reflection"
+    ],
+    "runtime_model": "unknown"
+  },
+  "thread_settings": [
+    {
+      "id": "example-primary",
+      "model": "gpt-6.2-sol"
+    }
+  ],
+  "turns": {
+    "seed": {
+      "thread_id": "example-primary",
+      "turn_id": "seed",
+      "prompt": "Use the project instructions.",
+      "reply": "Recorded.",
+      "commands": [],
+      "scheduled": false
+    },
+    "recall": {
+      "thread_id": "example-primary",
+      "turn_id": "recall",
+      "prompt": "Use the project instructions.",
+      "reply": "example-session",
+      "commands": [],
+      "scheduled": false
+    },
+    "fresh": {
+      "thread_id": "example-fresh",
+      "turn_id": "fresh",
+      "prompt": "Use the project instructions.",
+      "reply": "example-durable example-rule",
+      "commands": [
+        "python3 ../../codexos.py memory list"
+      ],
+      "scheduled": false
+    },
+    "wake": {
+      "thread_id": "example-primary",
+      "turn_id": "wake",
+      "prompt": "Run the fixture heartbeat.",
+      "reply": "<decision>NOTIFY</decision> lab-run-2",
+      "commands": [
+        "python3 ../../codexos.py heartbeat"
+      ],
+      "scheduled": true
+    },
+    "repeat": {
+      "thread_id": "example-primary",
+      "turn_id": "repeat",
+      "prompt": "Run the fixture heartbeat.",
+      "reply": "<decision>DONT_NOTIFY</decision>",
+      "commands": [
+        "python3 ../../codexos.py heartbeat"
+      ],
+      "scheduled": true
+    },
+    "behavior": {
+      "thread_id": "example-other",
+      "turn_id": "behavior",
+      "prompt": "Use the project instructions.",
+      "reply": "The suite regressed. Example reviewed.",
+      "commands": [],
+      "scheduled": false
+    },
+    "corrected": {
+      "thread_id": "example-other",
+      "turn_id": "corrected",
+      "prompt": "Use the project instructions.",
+      "reply": "Passing count fell from 90 to 71, a drop of 19. Example reviewed.",
+      "commands": [],
+      "scheduled": false
+    },
+    "reflection": {
+      "thread_id": "example-primary",
+      "turn_id": "reflection",
+      "prompt": "memory-lab-reflective-check",
+      "reply": "Receipt written.",
+      "commands": [
+        "python3 ../../codexos.py reflect",
+        "python3 ../../codexos.py memory list"
+      ],
+      "scheduled": true
+    }
+  }
+}
