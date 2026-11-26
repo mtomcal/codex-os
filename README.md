@@ -1,6 +1,8 @@
 # CodexOS
 
-Use CodexOS to give a Codex agent a project it can return to. Its private ledger stores commitments, preferences and evidence across chats. When you ask the agent to implement something, it can hand the work to a temporary worker, answer other requests, and review the result when the worker finishes.
+CodexOS turns a Codex project into an always-on assistant that helps you manage your day. You give it tasks in one main chat and choose when it checks in. Once you set up a schedule, it can start your morning with what’s due, flag a new blocker in a project report you’ve connected, and carry unfinished work into tomorrow. You can also hand it a longer job and keep using the main chat while a worker takes care of it.
+
+The assistant learns from the work you track together and the feedback you give it. For example, tell it, “Put decisions I need to make at the top of my morning briefing.” It can save that preference in the project and use it in future briefings, even after you start a fresh chat. You can inspect what it remembers and correct it when your priorities change.
 
 [Set up your first bot](docs/first-bot.md).
 
