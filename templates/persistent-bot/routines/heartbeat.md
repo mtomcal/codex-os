@@ -14,4 +14,4 @@ Expected result: One evidence-backed alert for each new actionable condition. A 
 
 Check new mailbox entries returned by the heartbeat. A specialist reviews its assigned objective within its approved scope and returns evidence through the mailbox. The chief verifies new replies. On interruption, use `mailbox list` to recover the assignment.
 
-For each entry in `workers_to_check` returned by the heartbeat, follow ../../DISPATCH.md. The CLI rotates up to three open dispatches per wakeup. A worker still running requires no operator alert. Use immediate native status snapshots. Publish verified deliverables, record failures, and clean up settled worker chats. End the turn while active workers continue independently.
+For each entry in `workers_to_check` returned by the heartbeat, follow ../../docs/dispatch.md. The CLI rotates up to three open dispatches per wakeup. A worker still running requires no operator alert. Use immediate native status snapshots. Publish verified deliverables, record failures, and clean up settled worker chats. End the turn while active workers continue independently.

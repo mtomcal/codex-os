@@ -26,6 +26,6 @@ A candidate that passes the incident cases and ordinary suite becomes eligible f
 
 ## Review the expectations
 
-The versioned [case file](cases-v1.json) defines the inputs, expected findings, evidence references, and silence conditions. The runner pins its digest before evaluating either version. Both versions receive the same tests from the current fleet. Review a changed expectation on its own and record it under a new version before evaluating a candidate.
+The versioned [case file](../acceptance/maintainer/cases-v1.json) defines the inputs, expected findings, evidence references, and silence conditions. The runner pins its digest before evaluating either version. Both versions receive the same tests from the current fleet. Review a changed expectation on its own and record it under a new version before evaluating a candidate.
 
 The first self-check observes an actual quiet heartbeat on a running workload, reads the source checkpoint before and after, and checks that the reviewer made no waste proposal. A separate synthetic positive control feeds three confirmed idle runs to the review rule. This comparison covers local decisions and CLI output. It uses synthetic incidents and does not measure live desktop notification delivery, token costs, or later real-world recurrence.

@@ -58,7 +58,8 @@ def prepare(parent):
         for module in ROOT.glob("*.py"):
             shutil.copy2(module, target / module.name)
         shutil.copytree(ROOT / "templates", target / "templates")
-        shutil.copy2(ROOT / "DISPATCH.md", target / "DISPATCH.md")
+        (target / "docs").mkdir()
+        shutil.copy2(ROOT / "docs/dispatch.md", target / "docs/dispatch.md")
         cli(path, "init")
         cli(path, "create-bot", "memory-lab", "--name", "Memory Lab " + run[:8],
             "--mission", "Exercise synthetic acceptance fixtures inside this disposable fleet.")
