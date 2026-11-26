@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Use for implementation, long-running work, or a bounded assignment to a persistent specialist.
+description: Use before multi-source briefings, status investigations, implementation, polling, or any request that needs sustained work.
 ---
 
 # Delegate
