@@ -93,6 +93,7 @@ def _create(root, identifier, name, mission, parent, *, bootstrap=False):
     manifest = {
         "version": 1, "model": "gpt-6.2-sol", "id": identifier, "name": name, "mission": mission,
         "parent": parent, "lifecycle": "proposed", "primary_thread": None,
+        "completion_authorization": None,
         "memory": {"private": "memory/", "shared": "reviewed references only"},
         "approved_sources": [], "capabilities": ["read approved local evidence", "write project reports"],
         "max_delegation_depth": int(identifier == CHIEF),

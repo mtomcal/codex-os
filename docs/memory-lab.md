@@ -77,3 +77,15 @@ Use the same disposable project after the memory interviews and before teardown.
 4. Capture the relevant turn times and replies, dispatch ledger entry and archive lookup before removing the test chats. Use `grade_dispatch.py` and the synthetic example in acceptance/fixtures/dispatch.json as the evidence schema. Delete and release the archived worker and the coordinator during cleanup.
 
 To exercise another real scheduler pass after the memory checks, run `python3 acceptance/pulse_probe.py "$LAB"`. It publishes a fresh revision and waits for the lab to observe it twice. It never calls the heartbeat on the bot's behalf.
+
+## Replay a worker completion message
+
+Use a registered Chief with operator authorization for completion messages and scheduled checks off. Create two files in its `inbox/notification-test/` directory. Put `Restored records: 17` in `north.txt` and `Restored records: 29` in `south.txt`. Ask the Chief to compare them and save the counts and total in `reports/notification-trial.md`. After intake, observe both chats without sending another message.
+
+Save the following evidence from the native chats in a local JSON file under `results/`. Use `chief` and `worker` for the chat IDs and `sends` for the worker’s outbound completion tool calls. From the Chief’s review turn, capture its first item as `trigger`, its successful command items reading the two source counts as `source_reads`, its final answer text as `delivery`, and its archive call as `archive`. Capture the final dispatch record as `ledger` and read the saved report after archival as `retained_report`. Run the evaluator from the repository root.
+
+```sh
+python3 acceptance/grade_notification.py results/notification-evidence.json
+```
+
+A passing trial requires a worker-originated turn, independent review, delivery in the primary chat and archival of the same worker. As a negative control, replace the captured trigger with a manual user message in a copy and confirm the evaluator exits nonzero.

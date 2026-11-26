@@ -15,6 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, help="create a new directory for this replay's evidence")
     parser.add_argument("--evidence-dir", type=Path, help="grade both native evidence bundles captured in this directory")
+    parser.add_argument("--notification-evidence", type=Path, help="grade a captured worker completion message and review")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="codexos-replay-") as tmp:
         out = Path(tmp)
@@ -35,6 +36,8 @@ def main():
                 ("Captured native memory trial", ["acceptance/grade_live.py", str(evidence/"live-evidence.json"), "--out", str(out/"native-memory.json")]),
                 ("Captured native worker trial", ["acceptance/grade_dispatch.py", str(evidence/"dispatch-evidence.json")]),
             ])
+        if args.notification_evidence:
+            jobs.append(("Worker completion notification", ["acceptance/grade_notification.py", str(args.notification_evidence.resolve())]))
         result = []
         for index, (label, argv) in enumerate(jobs, 1):
             run = subprocess.run([sys.executable, *argv], cwd=ROOT, capture_output=True, text=True,

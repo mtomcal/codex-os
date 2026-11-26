@@ -18,6 +18,14 @@ The primary chat owns intake, coordination, review, delivery, and cleanup. It an
 
 A second reservation for the same objective and scope returns `launch: false`. After an interruption between native launch and binding, look up the native worker by key and project. Bind its existing ID. If the native service confirms no worker exists, record that evidence with `dispatch abandon KEY --evidence TEXT` and reconcile cleanup. A new attempt uses a new key. Leave an ambiguous reservation visible when native absence cannot be verified.
 
+## Notify the Chief when work finishes
+
+During setup, the operator can authorize a worker to send one completion message to the registered primary chat. Record a reference to that human instruction in the local manifest as `completion_authorization`. Give the worker that reference, the dispatch key and the exact destination from `primary_thread`. A launch message from the Chief alone does not authorize a reply.
+
+Once the result or failure evidence is durable and all task work is finished, the worker checks the operator authorization and uses the native `send_message_to_thread` tool to notify that primary chat. Include the dispatch key, outcome and evidence location. For a chat-only result include the actual deliverable or its retrievable reference. End the worker turn after sending. If messaging is unavailable or denied, leave the outcome in the worker chat for heartbeat reconciliation.
+
+The completion message starts a coordinator turn. Match the native sender to the worker bound to the key and check the current dispatch state. If binding is still pending, reconcile the existing reservation first. Ignore an unrelated sender or an already cleaned key. Verify the result independently, post the verdict and deliverable in the primary chat and archive the bound worker. If the sender is still finishing its notification turn, confirm it has finished before archival. Leave an interrupted review or cleanup open for reconciliation.
+
 ## Review, deliver, and clean up
 
 Use `dispatch show KEY` for a status question and `dispatch list` for bounded coordinator reconciliation. On each normal heartbeat, inspect outstanding records. Query bound workers with the native status interface in a nonblocking pass. Keep the primary chat available between checks. A stalled or pending worker remains open until native evidence identifies its outcome. On confirmed failure, record `dispatch abandon KEY --evidence TEXT` and tell the operator which work remains.
