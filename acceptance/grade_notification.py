@@ -11,6 +11,7 @@ def checks(evidence):
     trigger = evidence["trigger"]
     receipt = trigger.get("output", {}).get("text", "")
     archive = evidence["archive"]
+    lookup = evidence.get("archive_lookup") or {}
     row = evidence["ledger"]
     numbers = {"17", "29", "46"}
     return {
@@ -35,6 +36,7 @@ def checks(evidence):
         "Chief archived the bound worker and retained the report": (
             archive["tool"] == "set_thread_archived" and archive["status"] == "completed"
             and archive["arguments"]["archived"] is True and archive["arguments"]["threadId"] == worker
+            and lookup.get("id") == worker and bool(row.get("host")) and lookup.get("hostId") == row["host"]
             and row["state"] == "cleaned" and bool(row["cleanup"])
             and numbers <= set(re.findall(r"\b\d+\b", evidence["retained_report"]))
         ),

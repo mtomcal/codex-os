@@ -25,6 +25,7 @@ def main():
         jobs = [
             ("Fleet unit and integration tests", ["-m", "unittest", "discover", "-s", "tests", "-v"]),
             ("Disposable bot creation and teardown", ["acceptance/check_cleanup.py"]),
+            ("Delegated worker archive requirements", ["acceptance/check_worker_archive.py"]),
             ("Fresh fleet CLI replay", ["acceptance/replay.py", "--output", str(out/"fleet.json")]),
             ("Fleet Maintainer candidate comparison", ["acceptance/maintainer/review.py", "--output", str(out/"review.json")]),
             ("Memory evaluator on synthetic input", ["acceptance/grade_live.py", "acceptance/fixtures/memory.json", "--out", str(out/"memory.json")]),

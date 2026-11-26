@@ -18,7 +18,7 @@ def checks(e):
             delivery["start"] >= worker["end"] and row["decision"] == "accepted" and
             row["report"] and row["review"] and "42" in delivery["reply"],
         "Worker archived and artifact survived":
-            e["archived_id"] == worker["thread"] and row["state"] == "cleaned" and
+            e.get("archived_id") == worker["thread"] and row["state"] == "cleaned" and
             row["cleanup"] and e["result_after_archive"] == 42,
     }
 
