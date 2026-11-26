@@ -12,6 +12,7 @@ import dispatch
 import fleet
 import ledger
 import monitor
+import release
 import scheduled
 
 ROOT = Path(__file__).resolve().parent
@@ -83,11 +84,13 @@ def main(argv=None, root=ROOT):
     sub.add_parser("status", help="Check this project's durable state")
     sub.add_parser("briefing", help="Read recent evidence and open work").add_argument(
         "--period", choices=("day", "week"), default="day")
-    for module in (fleet, ledger, monitor, dispatch, scheduled):
+    for module in (fleet, ledger, monitor, dispatch, scheduled, release):
         module.commands(sub)
     args = parser.parse_args(argv)
     if args.command == "init":
         return [record["id"] for record in fleet.bootstrap(root)]
+    if args.command == "release":
+        return release.verify(args)
     bot = select_bot(root, args.bot)
     if args.command in {"mailbox", "create-bot", "fleet-list"}:
         return fleet.run(None, args, root, bot)

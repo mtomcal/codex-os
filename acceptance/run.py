@@ -28,6 +28,7 @@ def main():
             ("Guided setup and resumable desktop bot provisioning", ["acceptance/check_provisioning.py"]),
             ("Delegated worker archive requirements", ["acceptance/check_worker_archive.py"]),
             ("Ordinary turn recovery after context loss", ["acceptance/check_recovery.py"]),
+            ("Published PR release receipt", ["acceptance/check_release.py"]),
             ("Fresh fleet CLI replay", ["acceptance/replay.py", "--output", str(out/"fleet.json")]),
             ("Fleet Maintainer candidate comparison", ["acceptance/maintainer/review.py", "--output", str(out/"review.json")]),
             ("Memory evaluator on synthetic input", ["acceptance/grade_live.py", "acceptance/fixtures/memory.json", "--out", str(out/"memory.json")]),

@@ -18,7 +18,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 LAB = "memory-lab"
 CHIEF = "chief-of-staff"
-MODULES = ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py", "permission_plan.py", "scheduled.py", "receipt_store.py")
+MODULES = tuple(sorted(path.name for path in ROOT.glob("*.py")))
 CREATE = ("create-bot", LAB, "--name", "Memory Lab", "--mission", "Exercise synthetic acceptance cases.")
 
 

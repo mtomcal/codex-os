@@ -31,7 +31,7 @@
         const poll = boundPoll(snapshot, job);
         if (poll?.thread.status?.type !== "idle") return;
         const turn = poll.latestTurn;
-        if (turn?.id && Number.isFinite(turn.completedAt) &&
+        if (typeof turn?.id === "string" && turn.id && Number.isFinite(turn.completedAt) &&
             ["completed", "failed", "interrupted"].includes(turn.status)) return turn;
     }
     async function activeCheckpoint(snapshot, job) {
