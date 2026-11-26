@@ -120,6 +120,17 @@ async function check() {
     trial.proposed();
 
     trial.plan.answer = "CodexOS ready: delivery-tracker";
+    trial.plan.itemDirectory = chief;
+    assert.equal((await trial.run()).status, "verification_required");
+    trial.proposed();
+    assert.equal(trial.plan.launchCount, 1);
+
+    trial.plan.itemDirectory = trial.project.path;
+    const startup = JSON.parse(execFileSync(python, [join(fleet, "codexos.py"), "status"], {
+        cwd: trial.project.path, encoding: "utf8",
+    }));
+    assert.equal(startup.bot, "delivery-tracker");
+    assert.equal(startup.integrity, "ok");
     assert.equal((await trial.run()).status, "active");
     trial.active();
     trial.plan.answer = "A later conversation reply";
