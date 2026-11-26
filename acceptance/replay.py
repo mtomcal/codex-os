@@ -5,9 +5,11 @@ import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,7 +18,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 LAB = "memory-lab"
 CHIEF = "chief-of-staff"
-MODULES = ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py", "permission_plan.py", "scheduled.py")
+MODULES = ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py", "permission_plan.py", "scheduled.py", "receipt_store.py")
 CREATE = ("create-bot", LAB, "--name", "Memory Lab", "--mission", "Exercise synthetic acceptance cases.")
 
 
@@ -34,21 +36,23 @@ class Replay:
         self.result = result
         self.bot = directory / "bots" / LAB
 
-    def cli(self, *args, bot=LAB, rejected=None):
+    def cli(self, *args, bot=LAB, rejected=None, raw=False):
         cwd = self.root / "bots" / bot if bot else self.root
         p = subprocess.run([sys.executable, str(self.root / "codexos.py"), *args], cwd=cwd,
-                           capture_output=True, text=True, timeout=15, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+                           capture_output=True, timeout=15, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         step = {"cwd": str(cwd.relative_to(self.root)), "args": args, "exit": p.returncode}
         self.result["commands"].append(step)
-        if p.stderr:
-            step["stderr"] = p.stderr.strip().replace(str(self.root), "<fleet>")
+        stderr = p.stderr.decode().strip()
+        if stderr:
+            step["stderr"] = stderr.replace(str(self.root), "<fleet>")
         if rejected:
-            self.check("Reject " + " ".join(args[:2]), True, p.returncode != 0 and rejected in p.stderr)
+            self.check("Reject " + " ".join(args[:2]), True, p.returncode != 0 and rejected in stderr)
             return
         if p.returncode:
-            raise RuntimeError(f"{args}: {p.stderr.strip()}")
-        data = json.loads(p.stdout) if p.stdout else None
-        return data
+            raise RuntimeError(f"{args}: {stderr}")
+        if raw:
+            return p.stdout
+        return json.loads(p.stdout) if p.stdout else None
 
     def check(self, description, expected, actual):
         ok = expected == actual
@@ -334,7 +338,145 @@ def permission_preflight(r):
             r.cli("workload", "show", "scoped-work")["state"])
 
 
-CASES = (factory,memory,workload,monitor,reliability,adapters,mailbox,permission_preflight)
+def durable_memory_index(r):
+    notes = r.bot / "MEMORY.md"
+    database = r.bot / "state/agent.sqlite3"
+    authored = notes.read_bytes()
+    initial_paths = set(r.bot.rglob("*"))
+
+    def index():
+        return r.cli("memory", "index", raw=True).decode()
+
+    r.check("An empty index creates no private state", [True, True],
+            ["No active records." in index(), initial_paths == set(r.bot.rglob("*"))])
+    r.cli("memory", "add", "release-platform", "Run on Linux", "--source", "https://example.test/source",
+          "--evidence", "evidence/linux.md")
+    first = index()
+    r.check("The view includes the stable key, source and evidence links", True,
+            all(fragment in first for fragment in ("`release-platform` (revision 1)", "Run on Linux",
+                                                    "<https://example.test/source>", "(<evidence/linux.md>)")))
+    r.cli("memory", "add", "release-platform", "Run on macOS", "--source", "operator", "--evidence", "evidence/mac.md")
+    r.check("Disputed memory stays out of the active view", False, "`release-platform`" in index())
+    r.cli("memory", "resolve", "release-platform", "2", "--latest", "2", "--source", "operator",
+          "--evidence", "evidence/decision.md")
+    r.cli("memory", "add", "expired", "Expired record", "--source", "operator", "--evidence", "test",
+          "--expires", "2020-01-01T00:00:00Z")
+    current_paths = set(r.bot.rglob("*"))
+    before = database.read_bytes()
+    view = index()
+    history = r.cli("memory", "list", "--all", "--key", "release-platform")
+    r.check("Only the superseding active revision appears while prior revisions remain in SQLite", True,
+            all(fragment in view for fragment in ("`release-platform` (revision 3)", "Run on macOS",
+                                                  "(<evidence/decision.md>)"))
+            and all(fragment not in view for fragment in ("Run on Linux", "Expired record", "evidence/linux.md"))
+            and [(row["rev"], row["status"]) for row in history] ==
+            [(3, "active"), (2, "archived"), (1, "archived")])
+    r.check("Rendering the index creates no second store and preserves the notes and database", True,
+            before == database.read_bytes() and authored == notes.read_bytes()
+            and current_paths == set(r.bot.rglob("*")))
+
+
+def receipt_archival(r):
+    name = "reused.json"
+    hot = r.bot / "evidence" / name
+    archive = r.bot / "state/evidence-archive"
+    database = r.bot / "state/agent.sqlite3"
+    r.add("workload", "receipt-check")
+
+    def transition(revision, state, *args, **kwargs):
+        return r.cli("workload", "update", "receipt-check", "--revision", str(revision), "--state", state,
+                     *args, **kwargs)
+
+    def receipt(result, run, key="receipt-check"):
+        return (json.dumps(dict(schema=1, kind="workload", id=key, criteria="fixture passes",
+                                result=result, run_id=run), indent=2) + "\n").encode()
+
+    def resolved(revision, **kwargs):
+        return r.cli("evidence", "resolve", "workload", "receipt-check", str(revision), raw=True, **kwargs)
+
+    def rotate(revision, *args, **kwargs):
+        return r.cli("evidence", "archive", "workload", "receipt-check", str(revision), *args, **kwargs)
+
+    def ledger_references():
+        with closing(sqlite3.connect(database)) as db:
+            return db.execute("""SELECT revision,evidence FROM ledger_history
+                WHERE id='receipt-check' AND evidence IS NOT NULL ORDER BY revision""").fetchall()
+
+    transition(1, "ready")
+    transition(2, "running")
+    hot.write_bytes(receipt("failed", "wrong-run", "another-item"))
+    transition(3, "failed", "--receipt", name, rejected="does not verify this item")
+    failed = receipt("failed", "run-original")
+    hot.write_bytes(failed)
+    old_ref = json.loads(transition(3, "failed", "--receipt", name)["evidence"])
+    r.check("The original filename and producer run ID survive acceptance", [name, "run-original"],
+            [old_ref["file"], old_ref["run_id"]])
+    r.check("Resolve verifies and emits exact hot bytes", failed.hex(), resolved(4).hex())
+    rotate(4, "--release-hot", rejected="active or retryable work pins")
+    r.check("Archive defaults to leaving the hot copy pinned", ["pinned", True],
+            [rotate(4)["hot"], hot.exists()])
+
+    transition(4, "ready")
+    transition(5, "running")
+    passed = receipt("passed", "run-successor")
+    hot.write_bytes(passed)
+    new_ref = json.loads(transition(6, "completed", "--receipt", name)["evidence"])
+    before = ledger_references()
+    r.check("Historical resolution follows the original digest across filename reuse", failed.hex(), resolved(4).hex())
+    r.check("Rotating the historical version preserves the newer hot file", ["different", passed.hex()],
+            [rotate(4, "--release-hot")["hot"], hot.read_bytes().hex()])
+    partial = archive / (".write-" + new_ref["sha256"])
+    partial.write_bytes(b"interrupted copy")
+    r.check("Retry replaces an interrupted copy and verifies the new digest", [new_ref, False],
+            [rotate(7)["reference"], partial.exists()])
+    blob = archive / new_ref["sha256"]
+    r.check("The content-addressed archive is private", [0, 0], [archive.stat().st_mode & 0o077, blob.stat().st_mode & 0o077])
+
+    pending = archive / (".release-" + new_ref["sha256"] + "-" + name)
+    blob.write_bytes(receipt("passed", "tampered-run"))
+    rotate(7, "--release-hot", rejected="archived receipt SHA-256")
+    r.check("Failed archive verification preserves the hot copy", passed.hex(), hot.read_bytes().hex())
+    blob.write_bytes(passed)
+
+    # Simulate a replacement captured in the rename window before an interruption.
+    replacement = receipt("passed", "later-publication")
+    hot.write_bytes(replacement)
+    hot.rename(pending)
+    rotate(7, "--release-hot", rejected="restored the replacement")
+    r.check("Release recovery preserves the producer's replacement", [replacement.hex(), False],
+            [hot.read_bytes().hex(), pending.exists()])
+    hot.write_bytes(passed)
+
+    # Resume after the durable archive exists and the hot file was renamed aside.
+    hot.rename(pending)
+    r.check("Retry completes a staged release and subsequent retries are harmless", ["released", "absent", False],
+            [rotate(7, "--release-hot")["hot"], rotate(7, "--release-hot")["hot"], pending.exists()])
+    r.check("Both original byte sequences still resolve after release", [failed.hex(), passed.hex()],
+            [resolved(4).hex(), resolved(7).hex()])
+    r.check("Rotation and resolution preserve the exact stored references", before, ledger_references())
+
+    blob.write_bytes(receipt("passed", "tampered-run"))
+    resolved(7, rejected="archived receipt SHA-256")
+    rotate(7, "--release-hot", rejected="archived receipt SHA-256")
+    blob.write_bytes(passed)
+    wrong_run = {**new_ref, "run_id": "other-run"}
+    with closing(sqlite3.connect(database)) as db, db:
+        db.execute("UPDATE ledger_history SET evidence=? WHERE kind='workload' AND id=? AND revision=7",
+                   (json.dumps(wrong_run), "receipt-check"))
+    resolved(7, rejected="receipt run_id does not match")
+    saved = archive / old_ref["sha256"]
+    saved.rename(archive / ".fixture-hidden")
+    hot.write_bytes(passed)
+    resolved(4, rejected="hot receipt SHA-256")
+    hot.unlink()
+    hot.symlink_to(blob)
+    resolved(4, rejected="codexos:")
+    r.cli("evidence", "resolve", "workload", "another-item", "7", rejected="no accepted receipt")
+    r.cli("evidence", "resolve", "workload", "../receipt-check", "7", rejected="use a lowercase ID")
+
+
+CASES = (factory, memory, workload, monitor, reliability, adapters, mailbox, permission_preflight,
+         durable_memory_index, receipt_archival)
 
 
 def main():

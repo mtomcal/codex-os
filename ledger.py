@@ -1,13 +1,11 @@
 """Transactional work, follow-ups and private memory for one bot."""
 import argparse
-import hashlib
 import json
-import os
 import re
-import stat
 from datetime import datetime, timezone
 
 import permission_plan
+import receipt_store
 
 
 WORK = {
@@ -116,8 +114,19 @@ def commands(subparsers):
         change.add_argument("--clear", action="append", choices=("review", "due", "dependency", "blocker", "workload", "source"), default=[])
         change.add_argument("--receipt", type=identifier, help="Verified run result filename directly under evidence/")
     subparsers.add_parser("strategic", help="Review up to three eligible items")
+    evidence = subparsers.add_parser("evidence", help="Archive or retrieve accepted receipt bytes").add_subparsers(
+        dest="action", required=True)
+    for action in ("archive", "resolve"):
+        entry = evidence.add_parser(action)
+        entry.add_argument("kind", choices=STATES)
+        entry.add_argument("id", type=identifier)
+        entry.add_argument("revision", type=int, help="Ledger outcome revision")
+        if action == "archive":
+            entry.add_argument("--release-hot", action="store_true",
+                               help="Release the original hot file after reviewing provenance and pins")
     memory = subparsers.add_parser("memory", help="Maintain source-attributed private knowledge").add_subparsers(dest="action", required=True)
     memory.add_parser("preferences", help="Read current operator preferences at startup")
+    memory.add_parser("index", help="Print active private records with source and evidence references")
     ls = memory.add_parser("list")
     ls.add_argument("--all", action="store_true", help="Include archived history")
     ls.add_argument("--key", type=identifier)
@@ -150,31 +159,6 @@ def item(db, kind, key):
     if row is None:
         raise ValueError(f"unknown {kind} {key}")
     return dict(row)
-
-
-def receipt(bot, name, record, target):
-    if not name:
-        raise ValueError("a machine-produced --receipt is required")
-    directory = os.open(bot / "evidence", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        with os.fdopen(fd, "rb") as file:
-            attrs = os.fstat(file.fileno())
-            if not stat.S_ISREG(attrs.st_mode) or attrs.st_size > 65536:
-                raise ValueError("receipt must be a regular file of at most 64 KiB")
-            data = file.read(65537)
-    finally:
-        os.close(directory)
-    if len(data) > 65536:
-        raise ValueError("receipt exceeds 64 KiB")
-    result = json.loads(data)
-    expected = {"schema": 1, "kind": record["kind"], "id": record["id"], "criteria": record["criteria"],
-                "result": "passed" if target == "completed" else "failed"}
-    if not isinstance(result, dict) or any(result.get(k) != v for k, v in expected.items()):
-        raise ValueError("receipt does not verify this item, criterion and outcome")
-    if not isinstance(result.get("run_id"), str) or not result["run_id"].strip():
-        raise ValueError("receipt requires a producer run_id")
-    return json.dumps({"file": name, "sha256": hashlib.sha256(data).hexdigest(), "run_id": result["run_id"]})
 
 
 def inventory(db, kind):
@@ -253,7 +237,7 @@ def registry(db, args, bot):
             if args.state in ("completed", "failed"):
                 if "criteria" in values and values["criteria"] != current["criteria"]:
                     raise ValueError("update criteria separately before recording an outcome")
-                values["evidence"] = receipt(bot, args.receipt, current, args.state)
+                values["evidence"] = receipt_store.accept(bot, args.receipt, current, args.state)
         elif args.receipt:
             raise ValueError("receipt requires a transition to completed or failed")
         if current["state"] in ("completed", "failed") and "criteria" in values:
@@ -331,6 +315,35 @@ def preferences(db):
         ORDER BY verified DESC,key LIMIT 100""", (now(),))]
 
 
+def markdown_text(value):
+    compact = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", " ".join(value.split()))
+    return re.sub(r"([\\`*_[\]<>~&])", r"\\\1", compact)
+
+
+def memory_reference(value):
+    if re.fullmatch(r"(?:https?://|codex://)[a-zA-Z0-9./?=_%&+#:@~-]+", value):
+        return f"<{value}>"
+    if re.fullmatch(r"(?:evidence|memory|inbox|reports)(?:/[a-zA-Z0-9_.-]+)+", value):
+        if not {".", ".."}.intersection(value.split("/")):
+            return f"[{value}](<{value}>)"
+    return markdown_text(value)
+
+
+def memory_index(db=None):
+    lines = ["# Active private memory"]
+    if db is not None and db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_memory'"
+    ).fetchone():
+        records = db.execute("""SELECT key,rev,content,source,evidence FROM ledger_memory
+            WHERE status='active' AND (expires IS NULL OR expires>?) ORDER BY key,rev DESC""", (now(),))
+        for key, revision, content, source, evidence in records:
+            lines.extend(("", f"- `{key}` (revision {revision}) {markdown_text(content)}",
+                          f"  Source {memory_reference(source)} · Evidence {memory_reference(evidence)}"))
+    if len(lines) == 1:
+        lines.extend(("", "No active records."))
+    return "\n".join(lines)
+
+
 def memory(db, args, bot):
     if getattr(args, "quiet", False):
         manifest = json.loads((bot / "bot.json").read_text(encoding="utf-8"))
@@ -401,6 +414,8 @@ def run(db, args, root, bot):
         return registry(db, args, bot)
     if args.command == "strategic":
         return strategic(db)
+    if args.command == "evidence":
+        return receipt_store.run(db, args, bot)
     if args.command == "memory":
         return memory(db, args, bot)
     if args.command == "feedback":

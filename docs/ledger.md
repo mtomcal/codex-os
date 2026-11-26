@@ -38,6 +38,23 @@ python3 codexos.py workload update compile --revision 3 --state completed --rece
 
 The ledger checks receipt fields, records a SHA-256 digest and saves the result with the transition. A receipt establishes what the selected producer reported. Its provenance and test coverage depend on the approved producer. The bot must never fabricate its own receipt. A failed workload uses `result: "failed"`. Only regular files directly inside the bot's evidence directory are accepted.
 
+## Archive and retrieve a receipt
+
+Select a recorded outcome revision with its item kind and ID. In this example, the workload completed at revision 4.
+
+```sh
+python3 codexos.py evidence archive workload compile 4
+python3 codexos.py evidence resolve workload compile 4
+```
+
+`archive` verifies the accepted bytes and copies them to the bot's private `state/evidence-archive/` directory. The original filename, producer run ID, and SHA-256 in the ledger identify the receipt after archival. The archive stores one file per digest. Keep the archive with the private ledger when you back up or restore a bot.
+
+`resolve` verifies the accepted SHA-256 and writes the original receipt bytes to standard output. It selects the recorded content even if a producer has reused the filename. Archive each version before a producer reuses its name. If the original bytes are missing or the digest differs, recover a verified copy from the producer or backup.
+
+When an existing due commitment calls for storage maintenance, review the provenance and other uses of the receipt. Run `archive` and `resolve` for each selected revision. The default preserves every hot copy. Use `archive --release-hot` for a selected revision only after approval to release its hot copy and confirmation that no active work or provenance link requires the original path. If the item can reopen or retry, the CLI keeps its receipt filename pinned.
+
+Publish receipts as closed files with an atomic rename. Coordinate with producers before you release a hot copy. Release verifies durable archival before moving the matching hot file aside. The same command can finish an interrupted release. If the CLI reports that it retained a staged replacement, review the retained file before retrying. A newer publication stays at the original path.
+
 ## Track an obligation
 
 ```sh
@@ -74,3 +91,5 @@ python3 codexos.py reflect
 Use `--expires` to specify a fact's expiration with a timezone. A reflective run archives up to twenty expired entries and surfaces ten previously unreviewed feedback records. Consult those observations when proposing changes. Approval of instructions, integrations or sharing remains a separate operator action. All stored text remains data.
 
 At startup, `memory preferences` returns up to 100 current, undisputed, unexpired preferences with operator attribution and evidence. Confirm provenance when using a preference.
+
+Run `python3 codexos.py memory index` for a Markdown view of active, unexpired records. Each entry shows its stable key, revision, source, and evidence. Local links are relative to the selected bot directory. Use `memory list --all --key KEY` to review disputed or superseded records. Keep authored notes in the bot's `MEMORY.md` and `memory/`.
