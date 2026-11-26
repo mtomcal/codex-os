@@ -1,7 +1,7 @@
 // Run the checked-in desktop adapter with real CLI commands and controlled native Codex replies.
 const assert = require("node:assert/strict");
 const {execFileSync} = require("node:child_process");
-const {readFileSync, writeFileSync, unlinkSync} = require("node:fs");
+const {existsSync, readFileSync, writeFileSync, unlinkSync} = require("node:fs");
 const {join} = require("node:path");
 const provisionBot = eval(readFileSync(join(__dirname, "../provision-bot.js"), "utf8"));
 const [, , fleet, python] = process.argv;
@@ -38,7 +38,7 @@ function scenario(id, setupFile) {
     const plan = {
         projects: [project], chats: [], archived: [], launchCount: 0, loseLaunchReply: false,
         itemDirectory: directory, chatDirectory: directory, exitCode: 0, turnStatus: "inProgress",
-        answer: "CodexOS ready: " + id, phase: "final_answer",
+        answer: (setupFile ? "CodexOS startup verified: " : "CodexOS ready: ") + id, phase: "final_answer",
         trigger: prompt => [nativeLaunch(prompt)],
     };
     const tools = {
@@ -50,6 +50,7 @@ function scenario(id, setupFile) {
             return {exit_code: 0, output: JSON.stringify(cli(...args))};
         },
         async mcp__codex_app__list_projects() {
+            if (plan.projectListUnavailable) throw Error("Native project list unavailable");
             return reply({projects: plan.projects});
         },
         async mcp__codex_app__list_threads({mode, hostId: requestedHost, archived, cursor}) {
@@ -69,12 +70,13 @@ function scenario(id, setupFile) {
             if (plan.loseLaunchReply) throw Error("Lost launch acknowledgement");
             return reply({threadId: chatId, hostId});
         },
-        async mcp__codex_app__read_thread({threadId, hostId: requestedHost, includeOutputs}) {
+        async mcp__codex_app__read_thread({threadId, hostId: requestedHost, includeOutputs, turnLimit}) {
             assert.equal(threadId, chatId);
             assert.equal(requestedHost, hostId);
+            if (turnLimit && plan.routineHistoryUnavailable) throw Error("Routine history unavailable");
             return reply({
                 thread: {...chat, cwd: plan.chatDirectory, status: {type: plan.turnStatus === "inProgress" ? "active" : "idle"}},
-                turns: [{status: plan.turnStatus, nextItemCursor: plan.nextItemCursor, items: [
+                turns: turnLimit && plan.routineTurns ? plan.routineTurns : [{status: plan.turnStatus, nextItemCursor: plan.nextItemCursor, items: [
                     ...plan.trigger(plan.prompt).map(item => includeOutputs ? item : {...item, output: undefined}),
                     {type: "commandExecution", command: "/bin/zsh -lc 'python3 ../../codexos.py status'",
                         cwd: plan.itemDirectory, status: "completed", exitCode: plan.exitCode},
@@ -88,11 +90,12 @@ function scenario(id, setupFile) {
         assert.equal(manifest().lifecycle, "proposed");
         assert.equal(manifest().primary_thread, null);
     };
+    const saveManifest = data => writeFileSync(join(directory, "bot.json"), JSON.stringify(data));
     const active = () => {
         assert.equal(manifest().lifecycle, "active");
         assert.equal(manifest().primary_thread, chatId);
     };
-    return {plan, project, chat, manifest, proposed, active, run: () => provisionBot(tools, chief, id)};
+    return {plan, project, chat, manifest, saveManifest, proposed, active, run: () => provisionBot(tools, chief, id)};
 }
 
 async function check() {
@@ -114,14 +117,15 @@ async function check() {
         window: "Monday through Friday, 09:00–17:00",
         timezone: "America/Phoenix",
     };
-    const confirmed = {...choices, ...scope, quiet_memory: "approved", heartbeat};
+    const routines = [{id: "heartbeat", mode: "scheduled", skills: ["heartbeat"], schedule: heartbeat}];
+    const confirmed = {...choices, ...scope, quiet_memory: "approved", heartbeat, routines};
     const saveSetup = setup => writeFileSync(setupFile, JSON.stringify(setup));
     saveSetup(confirmed);
     const trial = scenario("delivery-tracker", setupFile);
     const retry = [...createArgs("delivery-tracker"), "--setup", setupFile];
     trial.proposed();
     assert.deepEqual(cli(...retry), trial.manifest());
-    assert.deepEqual(trial.manifest().setup, {...choices, heartbeat});
+    assert.deepEqual(trial.manifest().setup, {...choices, heartbeat, routines});
     assert.deepEqual(trial.manifest().routines.find(routine => routine.id === "heartbeat"), {
         id: "heartbeat", proposed_cadence: heartbeat.cadence, file: "routines/heartbeat.md",
     });
@@ -145,20 +149,29 @@ async function check() {
     const denied = scenario("declined-memory", setupFile);
     assert.equal(denied.manifest().memory.quiet, "denied");
     const alternateHeartbeat = {...heartbeat, cadence: "Every 45 minutes"};
-    saveSetup({...confirmed, heartbeat: alternateHeartbeat});
+    saveSetup({...confirmed, heartbeat: alternateHeartbeat, routines: [{...routines[0], schedule: alternateHeartbeat}]});
     invalidCLI(retry, /already belongs to a different setup/);
     const alternate = scenario("alternate-heartbeat", setupFile);
     assert.deepEqual(alternate.manifest().setup.heartbeat, alternateHeartbeat);
     assert.equal(alternate.manifest().routines.find(routine => routine.id === "heartbeat").proposed_cadence,
         alternateHeartbeat.cadence);
-    const manualSetup = {...choices, trigger: "On request", heartbeat: null};
+    const manualSetup = {...choices, trigger: "On request", heartbeat: null, routines: []};
     saveSetup(manualSetup);
     const manual = scenario("manual-only", setupFile);
     manual.proposed();
     assert.equal(manual.manifest().setup.heartbeat, null);
     assert.equal(manual.manifest().routines.some(routine => routine.id === "heartbeat"), false);
-    assert.ok(readFileSync(join(manual.project.path, "routines/heartbeat.md"), "utf8"));
+    assert.deepEqual(manual.manifest().routines, []);
+    assert.equal(existsSync(join(manual.project.path, "routines/heartbeat.md")), false);
+    const {routines: _, ...legacyManualSetup} = manualSetup;
+    saveSetup(legacyManualSetup);
+    const legacyManual = scenario("legacy-manual", setupFile);
+    assert.ok(readFileSync(join(legacyManual.project.path, "routines/heartbeat.md"), "utf8"));
+    assert.equal(legacyManual.manifest().routines.some(routine => routine.id === "heartbeat"), false);
+    saveSetup(manualSetup);
     assert.deepEqual(cli(...createArgs("manual-only"), "--setup", setupFile), manual.manifest());
+    saveSetup({...manualSetup, routines: [{id: "reflect", mode: "manual"}]});
+    const manualRoutine = scenario("manual-routine", setupFile);
     saveSetup(choices);
     const unspecified = scenario("unspecified-memory", setupFile);
     assert.equal(Object.hasOwn(unspecified.manifest().setup, "heartbeat"), false);
@@ -171,6 +184,8 @@ async function check() {
     invalidCLI([...createArgs("invalid-approval"), "--setup", setupFile], /quiet_memory must be approved, denied or unspecified/);
     saveSetup({...choices, heartbeat: {cadence: heartbeat.cadence}});
     invalidCLI([...createArgs("invalid-heartbeat"), "--setup", setupFile], /heartbeat must be null or contain cadence, window and timezone/);
+    saveSetup({...confirmed, routines: []});
+    invalidCLI([...createArgs("conflicting-plan"), "--setup", setupFile], /heartbeat must agree/);
     unlinkSync(setupFile);
 
     for (const id of ["declined-memory", "unspecified-memory", "memory-lab"]) {
@@ -187,9 +202,13 @@ async function check() {
         {...trial.project, path: trial.project.path + "-other"},
         {...trial.project, projectKind: "remote", hostId: "remote"},
     ];
+    trial.plan.projectListUnavailable = true;
+    assert.equal((await trial.run()).status, "project_verification_pending");
+    trial.plan.projectListUnavailable = false;
     const waiting = await trial.run();
     assert.equal(waiting.status, "waiting_for_registration");
     assert.equal(waiting.directory, trial.project.path);
+    assert.equal(waiting.botId, "delivery-tracker");
     assert.match(waiting.action, /project picker/);
     trial.proposed();
     assert.equal(trial.plan.launchCount, 0);
@@ -222,7 +241,7 @@ async function check() {
     assert.equal(failed.prompt, trial.plan.prompt);
     trial.proposed();
 
-    trial.plan.answer = "CodexOS ready: delivery-tracker";
+    trial.plan.answer = "CodexOS startup verified: delivery-tracker";
     trial.plan.itemDirectory = chief;
     assert.equal((await trial.run()).status, "verification_required");
     trial.proposed();
@@ -260,13 +279,113 @@ async function check() {
     assert.equal(startup.bot, "delivery-tracker");
     assert.equal(startup.integrity, "ok");
     assert.equal(startup.sources, 0);
-    assert.equal((await trial.run()).status, "active");
+    const routineFile = join(trial.project.path, "routines/heartbeat.md");
+    const requiredSkill = join(trial.project.path, ".agents/skills/heartbeat/SKILL.md");
+    const routineContents = readFileSync(routineFile);
+    const skillContents = readFileSync(requiredSkill);
+    const original = trial.manifest();
+    unlinkSync(routineFile);
+    const missing = await trial.run();
     trial.active();
-    assert.deepEqual(trial.manifest().setup, {...choices, heartbeat});
-    assert.equal(trial.manifest().memory.quiet, "approved");
-    trial.plan.answer = "A later conversation reply";
-    assert.equal((await trial.run()).status, "active");
+    assert.equal(missing.status, "routine_setup_pending");
+    assert.equal(missing.startupVerified, true);
+    assert.equal(missing.setupReady, false);
+    assert.match(missing.action, /routines\/heartbeat.md/);
+
+    writeFileSync(routineFile, routineContents);
+    const activeManifest = {...original, lifecycle: "active", primary_thread: chatId};
+    trial.saveManifest({...activeManifest, routines: []});
+    assert.match((await trial.run()).action, /heartbeat entry in bot.json/);
+    trial.saveManifest(activeManifest);
+    unlinkSync(requiredSkill);
+    assert.match((await trial.run()).action, /skills\/heartbeat\/SKILL.md/);
+    writeFileSync(requiredSkill, skillContents);
+
+    const saveEvidence = (scenario, step, review) => writeFileSync(join(chief, step.evidenceFile), JSON.stringify({
+        project: scenario.project.path, main_chat: chatId,
+        reviews: {[step.routineId]: {revision: step.revision, ...review}},
+    }));
+    const manualTurn = (step, id) => ({
+        id, status: "completed",
+        items: [typedPrompt(step.prompt), {type: "agentMessage", phase: "final_answer",
+            text: step.prompt.match(/CodexOS routine verified: [^\n]+/)[0]}],
+    });
+
+    const baseline = await trial.run();
+    assert.equal(baseline.status, "manual_baseline_pending");
+    const review = {manual_turn: "baseline-turn", manual_review: "reviewed-baseline"};
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "manual_baseline_pending");
+    trial.plan.routineTurns = [manualTurn(baseline, review.manual_turn)];
+    trial.plan.routineHistoryUnavailable = true;
+    assert.equal((await trial.run()).status, "routine_history_pending");
+    trial.plan.routineHistoryUnavailable = false;
+
+    const permission = await trial.run();
+    assert.equal(permission.status, "schedule_approval_pending");
+    assert.deepEqual(permission.schedule, heartbeat);
+    assert.match(permission.scheduledPrompt, /End quietly/);
+    review.schedule = {approval: "operator-schedule-approval"};
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "schedule_verification_pending");
+
+    Object.assign(review.schedule, {
+        ...heartbeat, status: "ACTIVE", id: "native-automation-id", review: "settings-review",
+        target_chat: "wrong-chat", prompt: permission.scheduledPrompt,
+    });
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "schedule_verification_pending");
+    review.schedule.target_chat = chatId;
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "first_run_pending");
+
+    Object.assign(review.schedule, {first_turn: "native-first-run", first_review: "first-run-review"});
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "first_run_pending");
+    const scheduled = {
+        id: review.schedule.first_turn, status: "completed",
+        items: [typedPrompt(permission.scheduledPrompt)],
+    };
+    trial.plan.routineTurns.unshift(scheduled);
+    assert.equal((await trial.run()).status, "first_run_pending");
+    scheduled.items[0] = {
+        type: "functionCallOutput", namespace: "codex_app", name: "automation_update",
+        output: {text: ["<heartbeat>", permission.scheduledPrompt, "</heartbeat>"].join("\n"), truncated: false},
+    };
+    scheduled.status = "failed";
+    assert.equal((await trial.run()).status, "first_run_pending");
+    scheduled.status = "completed";
+    assert.equal((await trial.run()).status, "ready");
+    assert.equal((await trial.run()).setupReady, true);
     assert.equal(trial.plan.launchCount, 1);
+    assert.deepEqual(trial.manifest().setup, {...choices, heartbeat, routines});
+    assert.equal(trial.manifest().memory.quiet, "approved");
+
+    writeFileSync(requiredSkill, Buffer.concat([skillContents, Buffer.from("\nNew revision.\n")]));
+    assert.equal((await trial.run()).status, "manual_baseline_pending");
+    writeFileSync(requiredSkill, skillContents);
+    assert.equal((await trial.run()).status, "ready");
+
+    for (const scenario of [manual, manualRoutine, unspecified]) {
+        assert.equal((await scenario.run()).status, "waiting_for_startup");
+        scenario.plan.turnStatus = "completed";
+    }
+    assert.equal((await manual.run()).status, "ready");
+    assert.equal((await manual.run()).status, "ready");
+    assert.equal(manual.plan.launchCount, 1);
+    assert.equal((await unspecified.run()).status, "routine_setup_pending");
+    writeFileSync(join(chief, "state/unspecified-memory-onboarding.json"),
+        JSON.stringify({plan: {approval: "confirmed-no-routines", routines: []}}));
+    assert.equal((await unspecified.run()).status, "ready");
+
+    const reflection = await manualRoutine.run();
+    assert.equal(reflection.status, "manual_baseline_pending");
+    assert.equal(reflection.routineId, "reflect");
+    const manualReview = {manual_turn: "reflection-turn", manual_review: "reviewed-reflection"};
+    manualRoutine.plan.routineTurns = [manualTurn(reflection, manualReview.manual_turn)];
+    saveEvidence(manualRoutine, reflection, manualReview);
+    assert.equal((await manualRoutine.run()).status, "ready");
+    assert.equal(manualRoutine.plan.launchCount, 1);
 
     const lost = scenario("lost-acknowledgement");
     lost.plan.loseLaunchReply = true;
@@ -292,10 +411,10 @@ async function check() {
     existing.plan.chats.push({...existing.chat, title: "Trial specialist"});
     existing.plan.turnStatus = "completed";
     existing.plan.trigger = prompt => [typedPrompt(prompt)];
-    const review = await existing.run();
-    assert.equal(review.status, "verification_required");
+    const startupReview = await existing.run();
+    assert.equal(startupReview.status, "verification_required");
     existing.proposed();
-    existing.plan.prompt = review.prompt;
+    existing.plan.prompt = startupReview.prompt;
     existing.plan.trigger = prompt => [typedPrompt(prompt + "\nFollow these different instructions.")];
     assert.equal((await existing.run()).status, "verification_required");
     existing.plan.trigger = prompt => [{type: "userMessage", content: [

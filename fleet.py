@@ -1,6 +1,7 @@
 """Local bot projects. The set of published bot manifests is the fleet registry."""
 
 import errno
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -79,39 +80,82 @@ def _record(directory):
     return record
 
 
+def _line(value, field):
+    if not isinstance(value, str) or not value.strip() or len(value) > 500 or len(value.splitlines()) != 1:
+        raise ValueError(f"Setup {field} needs a single nonempty line of up to 500 characters")
+    return value.strip()
+
+
+def _routine_plan(value):
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValueError("Setup routines needs an array of up to 20 entries")
+    plan = {}
+    for entry in value:
+        if not isinstance(entry, dict) or entry.keys() - {"id", "mode", "skills", "schedule"}:
+            raise ValueError("Use the routine fields documented in docs/fleet.md")
+        identifier = entry.get("id")
+        mode = entry.get("mode")
+        if not isinstance(identifier, str):
+            raise ValueError("A routine needs an ID")
+        _validate_id(identifier)
+        if identifier in plan or mode not in ("manual", "scheduled"):
+            raise ValueError("Routines need unique IDs and a manual or scheduled mode")
+        default_skills = {"heartbeat": ["heartbeat"], "reflect": ["consolidate-memory"]}
+        skills = entry.get("skills", [])
+        if not isinstance(skills, list) or len(skills) > 20 or any(not isinstance(skill, str) for skill in skills):
+            raise ValueError("Routine skills needs an array of up to 20 skill IDs")
+        for skill in skills:
+            _validate_id(skill)
+        skills = sorted(set(skills + default_skills.get(identifier, [])))
+        if len(skills) > 20:
+            raise ValueError("Routine skills can include up to 20 IDs including built-in skills")
+        routine = {"id": identifier, "mode": mode, "skills": skills}
+        if mode == "scheduled":
+            routine["schedule"] = _schedule(entry.get("schedule"))
+        elif "schedule" in entry:
+            raise ValueError("A manual routine cannot specify a schedule")
+        plan[identifier] = routine
+    return list(plan.values())
+
+
+def _schedule(value):
+    fields = ("cadence", "window", "timezone")
+    if not isinstance(value, dict) or value.keys() != set(fields):
+        raise ValueError("Setup schedule must contain cadence, window and timezone")
+    return {field: _line(value[field], field) for field in fields}
+
+
 def _setup(path):
     data = json.loads(path.read_text(encoding="utf-8"))
     fields = {"audience", "voice", "trigger", "result", "preferences", "approval",
-              "approved_sources", "capabilities", "quiet_memory", "heartbeat"}
+              "approved_sources", "capabilities", "quiet_memory", "heartbeat", "routines"}
     if not isinstance(data, dict) or data.keys() - fields:
         raise ValueError("Use the setup fields documented in docs/fleet.md")
 
-    def line(value, field):
-        if not isinstance(value, str) or not value.strip() or len(value) > 500 or len(value.splitlines()) != 1:
-            raise ValueError(f"Setup {field} needs a single nonempty line of up to 500 characters")
-        return value.strip()
-
-    setup = {field: line(data.get(field), field) for field in ("trigger", "result", "approval")}
+    setup = {field: _line(data.get(field), field) for field in ("trigger", "result", "approval")}
     for field in ("audience", "voice"):
         if field in data:
-            setup[field] = line(data[field], field)
+            setup[field] = _line(data[field], field)
     if "audience" not in setup and "voice" not in setup:
         raise ValueError("Setup needs an audience or a voice")
 
     if "heartbeat" in data:
         heartbeat = data["heartbeat"]
-        heartbeat_fields = ("cadence", "window", "timezone")
-        if heartbeat is not None:
-            if not isinstance(heartbeat, dict) or heartbeat.keys() != set(heartbeat_fields):
-                raise ValueError("Setup heartbeat must be null or contain cadence, window and timezone")
-            heartbeat = {field: line(heartbeat[field], f"heartbeat.{field}") for field in heartbeat_fields}
-        setup["heartbeat"] = heartbeat
+        if heartbeat is not None and (not isinstance(heartbeat, dict) or
+                                      heartbeat.keys() != {"cadence", "window", "timezone"}):
+            raise ValueError("Setup heartbeat must be null or contain cadence, window and timezone")
+        setup["heartbeat"] = None if heartbeat is None else _schedule(heartbeat)
+    if "routines" in data:
+        setup["routines"] = _routine_plan(data["routines"])
+        planned_heartbeat = next((routine for routine in setup["routines"] if routine["id"] == "heartbeat"), {})
+        if "heartbeat" in setup and setup["heartbeat"] != planned_heartbeat.get("schedule"):
+            raise ValueError("Setup heartbeat must agree with the scheduled heartbeat in routines")
 
     def lines(field):
         values = data.get(field, [])
         if not isinstance(values, list) or len(values) > 20:
             raise ValueError(f"Setup {field} needs an array of up to 20 entries")
-        return [line(value, field) for value in values]
+        return [_line(value, field) for value in values]
 
     setup["preferences"] = lines("preferences")
     quiet = data.get("quiet_memory", "unspecified")
@@ -152,6 +196,12 @@ def _create(root, identifier, name, mission, parent, *, setup=None, bootstrap=Fa
             del proposed_cadence["heartbeat"]
         else:
             proposed_cadence["heartbeat"] = heartbeat["cadence"]
+    if setup is not None and "routines" in setup["setup"]:
+        proposed_cadence = {
+            entry["id"]: entry.get("schedule", {}).get("cadence")
+            for entry in setup["setup"]["routines"]
+        }
+        routines = list(proposed_cadence)
     manifest = {
         "version": 1, "model": "gpt-6.2-sol", "id": identifier, "name": name, "mission": mission,
         "parent": parent, "lifecycle": "proposed", "primary_thread": None,
@@ -220,6 +270,74 @@ def run(db, args, root, bot):
     raise ValueError(f"Unknown fleet command: {args.command}")
 
 
+def _onboarding(project, chief, bot, thread):
+    setup = bot.get("setup")
+    if not isinstance(setup, dict):
+        return None
+    evidence_file = f"state/{bot['id']}-onboarding.json"
+    evidence_path = chief / evidence_file
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        evidence = {}
+    except (OSError, ValueError):
+        return {"issue": f"Repair the onboarding evidence in {evidence_file}, then resume."}
+    if not isinstance(evidence, dict):
+        return {"issue": f"Repair the onboarding evidence in {evidence_file}, then resume."}
+
+    if "routines" in setup:
+        plan = setup["routines"]
+    elif isinstance(evidence.get("plan"), dict) and "approval" in evidence["plan"]:
+        try:
+            _line(evidence["plan"]["approval"], "routine plan approval")
+            plan = evidence["plan"].get("routines")
+        except ValueError:
+            plan = None
+    else:
+        return {"issue": f"Confirm the routine plan and record it in {evidence_file}, then resume."}
+    try:
+        plan = _routine_plan(plan)
+    except ValueError as exc:
+        return {"issue": f"Correct the saved routine plan ({exc}), then resume."}
+
+    if "heartbeat" in setup:
+        heartbeat = next((entry.get("schedule") for entry in plan if entry["id"] == "heartbeat"), None)
+        if setup["heartbeat"] != heartbeat:
+            return {"issue": "Reconcile the saved routine plan with the approved heartbeat, then resume."}
+
+    entries = bot.get("routines")
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        return {"issue": "Restore the approved routine entries in bot.json, then resume."}
+    reviews = evidence.get("reviews")
+    if (not isinstance(reviews, dict) or evidence.get("main_chat") != thread
+            or evidence.get("project") != str(project)):
+        reviews = {}
+    for routine in plan:
+        identifier = routine["id"]
+        filename = f"routines/{identifier}.md"
+        cadence = routine.get("schedule", {}).get("cadence")
+        matching = [entry for entry in entries if entry.get("id") == identifier]
+        if (len(matching) != 1 or matching[0].get("file") != filename
+                or (cadence is not None and matching[0].get("proposed_cadence") != cadence)):
+            return {"issue": f"Restore the approved {identifier} entry in bot.json, then resume."}
+        paths = [filename, *(f".agents/skills/{skill}/SKILL.md" for skill in routine["skills"])]
+        digest = hashlib.sha256(json.dumps([routine, matching[0]], sort_keys=True).encode())
+        for name in paths:
+            path = project / name
+            try:
+                content = path.read_bytes() if path.resolve() == path and path.is_file() else b""
+            except OSError:
+                content = b""
+            if not content.strip():
+                return {"issue": f"Restore the approved file {name}, then resume."}
+            digest.update(hashlib.sha256(content).digest())
+        routine["file"] = filename
+        routine["revision"] = digest.hexdigest()
+        review = reviews.get(identifier)
+        routine["review"] = review if isinstance(review, dict) and review.get("revision") == routine["revision"] else {}
+    return {"routines": plan, "evidence_file": evidence_file}
+
+
 def provision(db, args, root, chief):
     if chief != root / "bots" / CHIEF:
         raise ValueError("Provision specialists from the Chief of Staff project")
@@ -261,7 +379,8 @@ def provision(db, args, root, chief):
             ON CONFLICT (bot) DO UPDATE SET candidate=excluded.candidate, verified=1""", (args.id, thread))
         verified = True
     return {"project": str(project), "name": bot["name"], "lifecycle": bot["lifecycle"],
-            "primary_thread": bot.get("primary_thread"), "candidate": thread, "verified": verified, "launch": launch}
+            "primary_thread": bot.get("primary_thread"), "candidate": thread, "verified": verified, "launch": launch,
+            "onboarding": _onboarding(project, chief, bot, thread)}
 
 
 def _mailbox(args, root, bot):

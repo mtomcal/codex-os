@@ -5,11 +5,11 @@ The factory creates a durable project directory and an inactive routine proposal
 ## Guide setup in the Chief of Staff chat
 
 1. Confirm a stable bot ID, display name, and one-sentence mission. Ask who will use the result or what voice they prefer.
-2. Confirm when the bot should act, what it should return, and any standing work or communication preferences. Ask whether it needs a heartbeat unless the operator already made that clear. If it does, offer every 15 minutes or the operator's preferred cadence. Confirm the operating window and time zone, including an all-day window if preferred. For a manual-only bot, record no heartbeat and skip cadence, window, and time zone questions. Reuse answers the operator already gave.
+2. Confirm when the bot should act, what it should return, and any standing work or communication preferences. Ask whether it needs a heartbeat unless the operator already made that clear. If it does, offer every 15 minutes or the operator's preferred cadence. Confirm the operating window and time zone, including an all-day window if preferred. For a manual-only bot, skip cadence, window, and time zone questions. List each required manual routine or confirm that the bot needs none. Record each intended scheduled routine with its cadence, window, and time zone. Reuse answers the operator already gave.
 3. Review only the tools, actions, and exact sources needed for the mission. Ask whether the bot may quietly save durable preferences, corrections, and verified lessons in its private ledger during ordinary turns. Explain that approved saves need no separate request or routine announcement. Record explicit consent as `approved`, an explicit refusal as `denied`, and an unanswered choice as `unspecified`. Keep quiet capture off without explicit consent.
-4. Show one brief summary with the name, ID, mission, audience or voice, trigger, result, preferences, scope, quiet-memory choice, and heartbeat choice. Include cadence, window, and time zone for a proposed heartbeat. Ask the operator to approve the summary. State that scope records the intended work and Codex still enforces tool access and sandbox restrictions. Request separate authorization for source access or registration, integrations, external messages, project registration, bot activation, and schedule activation as applicable.
+4. Show one brief summary with the name, ID, mission, audience or voice, trigger, result, preferences, scope, quiet-memory choice, and required routines with their skills and modes. Include cadence, window, and time zone for a proposed heartbeat. Ask the operator to approve the summary. State that scope records the intended work and Codex still enforces tool access and sandbox restrictions. Request separate authorization for source access or registration, integrations, external messages, project registration, bot activation, and schedule activation as applicable.
 5. After approval, save the confirmed choices as JSON under the Chief's `state/`, for example `state/delivery-tracker-setup.json`. Use the operator's approval link or chat and turn reference for `approval`. Retain references and short choices without credentials, raw logs, or transcripts. Pass the file with `--setup` and review the returned proposed manifest against the approved summary.
-6. With authorization for project registration and bot activation, run the desktop check below. Report a bot as ready only when the check returns `active`. If it returns `waiting_for_registration`, have the operator add the exact printed folder through Codex's project picker and resume with the same ID.
+6. With authorization for project registration and bot activation, run the desktop check below. If it returns `waiting_for_registration`, give the operator the exact folder and bot ID. When the operator confirms they added the folder in the Codex project picker, rerun the desktop check for that ID. Use the saved setup and existing chat. Report full onboarding only when the check returns `ready`.
 
 This example records a confirmed setup. Include at least one of `audience` or `voice`. Use empty arrays for preferences or scope with no approved entries.
 
@@ -24,11 +24,18 @@ This example records a confirmed setup. Include at least one of `audience` or `v
   "capabilities": ["Read approved local evidence", "Write project reports"],
   "approved_sources": ["inbox/milestones.json"],
   "quiet_memory": "approved",
-  "heartbeat": {
-    "cadence": "Every 15 minutes",
-    "window": "Monday through Friday, 09:00–17:00",
-    "timezone": "America/Phoenix"
-  }
+  "routines": [
+    {
+      "id": "heartbeat",
+      "mode": "scheduled",
+      "skills": ["heartbeat"],
+      "schedule": {
+        "cadence": "Every 15 minutes",
+        "window": "Monday through Friday, 09:00 to 17:00",
+        "timezone": "America/Phoenix"
+      }
+    }
+  ]
 }
 ```
 
@@ -36,7 +43,7 @@ This example records a confirmed setup. Include at least one of `audience` or `v
 python3 ../../codexos.py create-bot delivery-tracker --name 'Delivery Tracker' --mission 'Review local milestone evidence and identify overdue dependencies.' --setup state/delivery-tracker-setup.json
 ```
 
-The factory saves the choices and approval reference in `bot.json`. Generated instructions read them on startup and after chat replacement. An omitted `quiet_memory` field becomes `unspecified`. Use `"heartbeat": null` to record no heartbeat and omit its routine proposal. If an existing caller omits `heartbeat` or `--setup`, the factory retains the legacy routine proposal. The factory prepares a project without scheduling work or granting native permissions.
+The factory saves the choices and approval reference in `bot.json`. Generated instructions read them on startup and after chat replacement. An omitted `quiet_memory` field becomes `unspecified`. Use `"routines": []` when the operator approves a setup with no required routines. Use `{"id": "reflect", "mode": "manual"}` for a routine that needs a manual baseline. List any required skill IDs in `skills`. The factory includes the built-in skill for heartbeat and reflection. Put each custom routine in `routines/<id>.md` and each required skill in `.agents/skills/<id>/SKILL.md` before validation. The factory prepares a project without scheduling work or granting native permissions. Earlier callers can continue using `heartbeat` or omitting `--setup`.
 
 From the Chief of Staff project, run the desktop check in the Codex code-mode tool. Use the Chief's absolute directory for `workdir` if the chat runs elsewhere.
 
@@ -47,19 +54,47 @@ const result = await eval(script.output)(tools, undefined, "delivery-tracker");
 text(result);
 ```
 
-Resume the same check after the startup turn finishes. If verification fails, use the returned prompt in the existing main chat. If Codex cannot confirm a launch, check the project's chats before creating anything manually. Provisioning records the launch attempt and leaves ambiguous launches pending. If the sandbox requires approval to save the target manifest, pass `{approveManifestWrite: true}` as the fourth argument to request access for that CLI step.
+Resume the same check after the startup turn finishes. If startup verification fails, use the returned prompt in the existing main chat. If Codex cannot confirm a launch, check the project's chats before creating anything manually. If the sandbox requires approval to save the target manifest, pass `{approveManifestWrite: true}` as the fourth argument. The manifest's `active` lifecycle records main-chat activation. The desktop result's `ready` status records onboarding readiness. A project created without guided setup retains its legacy `active` result and has no readiness verdict.
 
-## Configure approved sources and routines
+## Verify required routines
 
-Place permitted producer artifacts in the specialist's inbox. Register their exact paths using the monitor commands with the operator's authorization. If the bot has a heartbeat proposal, run it manually once in the verified main chat to establish the baseline. An empty registered source list should yield a quiet run.
+Register any separately authorized source paths using the monitor commands before baselining routines that rely on them. For each pending routine, act on the returned status and then run the same desktop check.
 
-Review each proposed routine's file, time zone, working hours, and cadence. For a heartbeat with a confirmed setup preference, use `setup.heartbeat` in `bot.json` as the starting point. With separate authorization for schedule activation, use Codex automations to register each approved schedule. Select the project's existing primary chat where supported. If Codex offers a separate local run, select the same project directory and verify the state is reachable. An isolated copy needs approved access to shared state. If neither path is available, run the routine manually.
+1. For `routine_setup_pending`, compare the saved plan with `bot.json`, each routine file, and the required skill files. Restore missing approved files and entries. For an earlier guided setup without `setup.routines`, recover the approved routine choices. Confirm any unresolved choice with the operator and record a top-level `plan` with `approval` and `routines` in the evidence file described below.
+2. For `manual_baseline_pending`, use the returned prompt in the verified main chat. Inspect the native turn for successful execution in that project and any expected effects. Record the turn ID and review reference. Reuse the existing baseline if it already ran.
+3. For `schedule_approval_pending`, obtain and record explicit approval to activate that routine's schedule. For `schedule_verification_pending`, look up the authorized automation in Codex. If Codex confirms there is no existing automation for the routine, create it with the returned `scheduledPrompt` and the verified main chat. Verify its ID, active status, target chat, exact prompt, next run, and cadence, window, and time zone against the approved plan. Record the reviewed settings. If Codex cannot show the settings or attach the automation to the main chat, keep this step pending.
+4. For `first_run_pending`, inspect the first run in the exact automation's native history. Verify the outcome, project state, and any duplicate alerts. Record the successful turn ID and review reference. A manually triggered turn cannot stand in for a scheduled run.
 
-Use the actual relative routine filename from `bot.json` in this prompt.
+Keep the review in `state/<id>-onboarding.json` under the Chief's directory. Write it after independently checking the native records. Keep existing entries when adding evidence. Use references to operator turns and reviews in place of transcripts or raw output. The desktop check looks for referenced turns in the 50 most recent main-chat turns. If the native records are unavailable or incomplete, leave the check pending.
 
-> In this bot's project directory, read AGENTS.md. Execute routines/heartbeat.md once. Report an actionable finding with its evidence. End quietly when the routine returns no finding.
+```json
+{
+  "project": "/exact/project/path/returned/by/Codex",
+  "main_chat": "verified-native-chat-id",
+  "reviews": {
+    "heartbeat": {
+      "revision": "revision returned by the desktop check",
+      "manual_turn": "native-baseline-turn-id",
+      "manual_review": "reference to the coordinator's baseline review",
+      "schedule": {
+        "approval": "operator authorization reference",
+        "id": "verified native automation ID",
+        "review": "reference to the coordinator's native settings review",
+        "status": "ACTIVE",
+        "target_chat": "verified-native-chat-id",
+        "prompt": "exact scheduledPrompt returned by the desktop check",
+        "cadence": "Every 15 minutes",
+        "window": "Monday through Friday, 09:00 to 17:00",
+        "timezone": "America/Phoenix",
+        "first_turn": "native-scheduled-turn-id",
+        "first_review": "reference to the coordinator's first-run review"
+      }
+    }
+  }
+}
+```
 
-Confirm the next scheduled time in Codex. Inspect the first run for the selected directory, accessible state, output, and duplicate alerts. To pause a bot, pause its native schedules, then update its manifest lifecycle.
+For a manual routine, omit `schedule`. For a scheduled routine, add the fields as you verify each step. The check binds reviews to the exact project, main chat, and routine revision. A change to a required file or routine entry needs a new review. To pause a bot, pause its native schedules, then update its manifest lifecycle.
 
 ## Route an investigation
 
