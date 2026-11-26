@@ -84,7 +84,7 @@ def replay(root, suite, timestamp):
 def compare(suite, timestamp, candidate):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        for filename in ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py"):
+        for filename in ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py", "permission_plan.py"):
             shutil.copy(FLEET / filename, root / filename)
         for directory in ("templates", "tests"):
             shutil.copytree(FLEET / directory, root / directory,

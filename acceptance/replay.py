@@ -16,7 +16,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 LAB = "memory-lab"
 CHIEF = "chief-of-staff"
-MODULES = ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py")
+MODULES = ("codexos.py", "fleet.py", "ledger.py", "monitor.py", "dispatch.py", "permission_plan.py")
 CREATE = ("create-bot", LAB, "--name", "Memory Lab", "--mission", "Exercise synthetic acceptance cases.")
 
 
@@ -256,7 +256,85 @@ def mailbox(r):
     r.check("Chief's next heartbeat is quiet",None,r.cli("heartbeat",bot=CHIEF))
 
 
-CASES = (factory,memory,workload,monitor,reliability,adapters,mailbox)
+def permission_preflight(r):
+    plan = json.dumps([
+        dict(id="read-report", action="Read test summary", target="Release fixture report", required=True),
+        dict(id="notify-chief", action="Send one completion notice", required=False,
+             target="Chief chat fixture. Dispatch key, outcome and verification summary only."),
+    ])
+    grant = {"read-report": {"decision": "approved", "evidence": "fixture chat 1, turn 2, user message 3"}}
+    denial = {"read-report": {"decision": "denied", "evidence": "fixture chat 1, turn 4, user message 5"}}
+    denied_notice = {"notify-chief": {"decision": "denied", "evidence": "fixture chat 1, turn 2, user message 3"}}
+
+    def reserve(key, *args):
+        return r.cli("dispatch", "reserve", key, "--objective", "Verify permissions",
+                     "--scope", "Fixture project only", *args)
+
+    prepared = reserve("permitted-dispatch", "--prepare", "--plan", plan)
+    r.check("Permission bundle is durable before any worker launch", ["pending", 0, False],
+            [prepared["permissions"]["status"], prepared["launch_issued"], prepared["launch"]])
+    r.check("The bundle stays pending after a legacy-form retry", False, reserve("permitted-dispatch")["launch"])
+    r.cli("dispatch", "bind", "permitted-dispatch", "fixture-worker", rejected="Claim the dispatch launch")
+    recorded = r.cli("dispatch", "permissions", "permitted-dispatch", "--decisions", json.dumps(grant))
+    r.check("Approved subset preserves scope, evidence and the unanswered optional action",
+            ["ready", None, "Release fixture report", grant["read-report"]["evidence"]],
+            [recorded["status"], recorded["items"][0]["decision"], recorded["items"][1]["target"],
+             recorded["items"][1]["evidence"]])
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(reserve, ["permitted-dispatch"] * 3))
+    r.check("Concurrent resumes claim one launch and preserve the same bundle", [1, [recorded] * 3],
+            [sum(result["launch"] for result in results), [result["permissions"] for result in results]])
+    repeated = reserve("permitted-dispatch", "--plan", plan, "--decisions", json.dumps(grant))
+    r.check("Retries of the same bundle and grant produce no duplicate requests or launch",
+            [False, recorded], [repeated["launch"], repeated["permissions"]])
+    r.cli("dispatch", "reserve", "permitted-dispatch", "--objective", "Verify permissions",
+          "--scope", "Fixture project only", "--plan", plan.replace("Release fixture report", "Other report"),
+          rejected="Permission request already has a different scope")
+    r.cli("dispatch", "bind", "permitted-dispatch", "fixture-worker")
+
+    denied = reserve("denied-dispatch", "--plan", plan, "--decisions", json.dumps(denial))
+    r.check("A denied required permission leaves the dispatch unlaunched", ["denied", False],
+            [denied["permissions"]["status"], reserve("denied-dispatch")["launch"]])
+    r.cli("dispatch", "permissions", "denied-dispatch", "--decisions", json.dumps(grant),
+          rejected="Permission decision is already recorded")
+
+    covered = reserve("covered-dispatch", "--plan", plan, "--decisions", json.dumps(grant | denied_notice))
+    r.check("A verified existing grant and declined optional action permit the first launch", [True, "denied"],
+            [covered["launch"], covered["permissions"]["items"][0]["decision"]])
+    legacy = reserve("legacy-dispatch", "--plan", "[]")
+    r.check("An empty permission plan preserves one-shot legacy launch", [True, False, False],
+            [legacy["launch"], "permissions" in legacy, reserve("legacy-dispatch")["launch"]])
+
+    reuse = ("--reuse", "permitted-dispatch", "--requirement", "Review another part of the fixture")
+    extra = reserve("reuse-permissions", *reuse, "--plan", plan)
+    r.check("A reused dispatch records an independent permission bundle", [False, "pending", "fixture-worker"],
+            [extra["launch"], extra["permissions"]["status"], extra["worker"]])
+    claim = ("dispatch", "handoff", "reuse-permissions", "--claim", "fixture chat 1, separate send grant")
+    r.cli(*claim, rejected="Required handoff permissions are pending")
+    r.cli("dispatch", "permissions", "reuse-permissions", "--decisions", json.dumps(grant))
+    r.check("An approved work plan leaves the message handoff pending",
+            "pending", r.cli("dispatch", "show", "reuse-permissions")["handoff"])
+    r.check("The separate message claim is one-shot", [True, False], [r.cli(*claim)["send"], r.cli(*claim)["send"]])
+
+    r.add("workload", "scoped-work")
+    r.cli("workload", "permissions", "scoped-work", "--plan", plan)
+    r.cli("workload", "update", "scoped-work", "--revision", "1", "--state", "ready")
+    start = ("workload", "update", "scoped-work", "--revision", "2", "--state", "running")
+    r.cli(*start, rejected="Required workload permissions are pending")
+    r.cli("workload", "permissions", "scoped-work", "--decisions", json.dumps(grant))
+    r.check("An approved workload starts without a revision change from preflight", "running", r.cli(*start)["state"])
+    r.cli("workload", "update", "scoped-work", "--revision", "3", "--state", "waiting")
+    resume_plan = json.dumps([dict(id="read-next", action="Read follow-up", target="New report", required=True)])
+    r.cli("workload", "permissions", "scoped-work", "--plan", resume_plan)
+    resume = ("workload", "update", "scoped-work", "--revision", "4", "--state", "running")
+    r.cli(*resume, rejected="Required workload permissions are pending")
+    r.cli("workload", "permissions", "scoped-work", "--decisions", json.dumps({"read-next": denial["read-report"]}))
+    r.cli(*resume, rejected="Required workload permissions are denied")
+    r.check("A denied resume retains the workload's prior state", "waiting",
+            r.cli("workload", "show", "scoped-work")["state"])
+
+
+CASES = (factory,memory,workload,monitor,reliability,adapters,mailbox,permission_preflight)
 
 
 def main():

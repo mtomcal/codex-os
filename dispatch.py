@@ -5,6 +5,8 @@ import json
 import re
 from uuid import UUID
 
+import permission_plan
+
 
 def install(db):
     db.execute("""CREATE TABLE IF NOT EXISTS dispatches (
@@ -14,8 +16,11 @@ def install(db):
         host TEXT, worker TEXT, report TEXT, decision TEXT, review TEXT, cleanup TEXT,
         updated TEXT NOT NULL, UNIQUE(host,worker))""")
 
-    if "delivery" not in {row[1] for row in db.execute("PRAGMA table_info(dispatches)")}:
+    columns = {row[1] for row in db.execute("PRAGMA table_info(dispatches)")}
+    if "delivery" not in columns:
         db.execute("ALTER TABLE dispatches ADD COLUMN delivery TEXT")
+    if "launch_issued" not in columns:
+        db.execute("ALTER TABLE dispatches ADD COLUMN launch_issued INTEGER NOT NULL DEFAULT 1")
 
     db.execute("""CREATE TABLE IF NOT EXISTS dispatch_poll (
         key TEXT PRIMARY KEY REFERENCES dispatches(key), turn INTEGER NOT NULL)""")
@@ -36,7 +41,8 @@ def pending_handoffs(db):
 def pending(db):
     rows = [dict(row) for row in db.execute("""SELECT d.key,d.state,d.host,d.worker,d.delivery
         FROM dispatches d LEFT JOIN dispatch_poll p USING(key)
-        WHERE d.state!='cleaned' ORDER BY COALESCE(p.turn,0),d.updated,d.key LIMIT 3""")]
+        WHERE d.state!='cleaned' AND (d.launch_issued OR d.state!='reserved')
+        ORDER BY COALESCE(p.turn,0),d.updated,d.key LIMIT 3""")]
     if rows:
         turn = db.execute("SELECT COALESCE(MAX(turn),0)+1 FROM dispatch_poll").fetchone()[0]
         db.executemany("""INSERT INTO dispatch_poll(key,turn) VALUES(?,?)
@@ -81,7 +87,8 @@ def commands(sub):
         dest="dispatch_action", required=True)
     listing = actions.add_parser("list", help="Show up to 50 jobs, active work first")
     listing.add_argument("--active", action="store_true", help="Show all running jobs with bound workers")
-    for name in ("reserve", "bind", "report", "review", "abandon", "delivered", "cleaned", "show", "handoff"):
+    for name in ("reserve", "bind", "report", "review", "abandon", "delivered", "cleaned", "show",
+                 "handoff", "permissions"):
         action = actions.add_parser(name)
         action.add_argument("key", type=key_text)
         if name == "reserve":
@@ -89,6 +96,10 @@ def commands(sub):
             action.add_argument("--scope", required=True, type=short_text)
             action.add_argument("--reuse", type=key_text, help="Reuse this dispatch's bound worker")
             action.add_argument("--requirement", type=short_text, help="Additional work within the existing scope")
+            action.add_argument("--plan", metavar="JSON", help="Permission requests to record for this dispatch")
+            action.add_argument("--prepare", action="store_true", help="Record intake without claiming a launch")
+        if name in {"reserve", "permissions"}:
+            action.add_argument("--decisions", metavar="JSON", help="Verified operator decisions and references")
         if name == "handoff":
             operation = action.add_mutually_exclusive_group(required=True)
             operation.add_argument("--claim", type=short_text, metavar="AUTHORIZATION")
@@ -109,6 +120,15 @@ def addition(db, key):
     return dict(row) if row else None
 
 
+def reserve_permissions(db, args, record, *, allow_new):
+    key = args.key
+    if args.plan is not None:
+        permission_plan.add(db, "dispatch", key, args.plan, allow_new=allow_new)
+    if args.decisions is not None:
+        permission_plan.decide(db, "dispatch", key, args.decisions)
+    return permission_plan.annotate(db, "dispatch", key, record)
+
+
 def reserve(db, args, stamp):
     key = args.key
     if bool(args.reuse) != bool(args.requirement):
@@ -118,7 +138,7 @@ def reserve(db, args, stamp):
         if (args.reuse, args.requirement, args.objective, args.scope) != (
                 existing["parent"], existing["requirement"], existing["objective"], existing["scope"]):
             raise ValueError("Dispatch key already identifies a different request")
-        return dict(existing, launch=False)
+        return reserve_permissions(db, args, dict(existing, launch=False), allow_new=False)
     if args.reuse:
         if db.execute("SELECT 1 FROM dispatches WHERE key=?", (key,)).fetchone():
             raise ValueError("Dispatch key already identifies a standalone job")
@@ -129,14 +149,20 @@ def reserve(db, args, stamp):
             raise ValueError("Reuse requires the existing dispatch's exact objective and scope")
         db.execute("INSERT INTO dispatch_additions(key,parent,requirement,updated) VALUES(?,?,?,?)",
                    (key, args.reuse, args.requirement, stamp))
-        return dict(addition(db, key), launch=False)
-    created = db.execute("""INSERT INTO dispatches(key,objective,scope,state,updated)
-        VALUES(?,?,?,'reserved',?) ON CONFLICT(key) DO NOTHING""",
-        (key, args.objective, args.scope, stamp)).rowcount == 1
+        return reserve_permissions(db, args, dict(addition(db, key), launch=False), allow_new=True)
+    db.execute("""INSERT INTO dispatches(key,objective,scope,state,updated,launch_issued)
+        VALUES(?,?,?,'reserved',?,0) ON CONFLICT(key) DO NOTHING""",
+        (key, args.objective, args.scope, stamp))
     record = dict(db.execute("SELECT * FROM dispatches WHERE key=?", (key,)).fetchone())
     if (args.objective, args.scope) != (record["objective"], record["scope"]):
         raise ValueError("Dispatch key already identifies a different objective or scope")
-    return dict(record, launch=created)
+    unclaimed = record["state"] == "reserved" and not record["launch_issued"]
+    record = reserve_permissions(db, args, record, allow_new=unclaimed)
+    launch = unclaimed and not args.prepare and record.get("permissions", {}).get("status", "ready") == "ready"
+    if launch:
+        db.execute("UPDATE dispatches SET launch_issued=1,updated=? WHERE key=?", (stamp, key))
+        record.update(launch_issued=1, updated=stamp)
+    return dict(record, launch=launch)
 
 
 def handoff(db, args, stamp):
@@ -149,6 +175,9 @@ def handoff(db, args, stamp):
             return dict(record, send=False)
         if record["state"] != "running":
             raise ValueError("The bound dispatch is no longer running")
+        status = permission_plan.read(db, "dispatch", args.key)["status"]
+        if status != "ready":
+            raise ValueError(f"Required handoff permissions are {status}")
         changes = {"handoff": "sending", "authorization": args.claim, "evidence": None}
     elif args.sent:
         changes = {"handoff": "sent", "evidence": args.sent}
@@ -180,9 +209,13 @@ def run(db, args, root, bot):
     if action == "handoff":
         return handoff(db, args, stamp)
     row = db.execute("SELECT * FROM dispatches WHERE key=?", (key,)).fetchone()
+    if action == "permissions" and (row is not None or addition(db, key) is not None):
+        if args.decisions is not None:
+            permission_plan.decide(db, "dispatch", key, args.decisions)
+        return permission_plan.read(db, "dispatch", key)
     if row is None:
         if action == "show" and (record := addition(db, key)):
-            return record
+            return permission_plan.annotate(db, "dispatch", key, record)
         raise ValueError(f"Unknown dispatch: {key}")
     record = dict(row)
     if action == "show":
@@ -190,8 +223,10 @@ def run(db, args, root, bot):
             WHERE parent=? ORDER BY key""", (key,))]
         if added:
             record["additions"] = added
-        return record
+        return permission_plan.annotate(db, "dispatch", key, record)
     if action == "bind":
+        if not record["launch_issued"]:
+            raise ValueError("Claim the dispatch launch with reserve before binding a worker")
         changes = {"worker": args.thread_id, "host": args.host}
         required = ("reserved",)
         state = "running"

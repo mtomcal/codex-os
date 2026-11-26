@@ -24,7 +24,7 @@ You need Python 3.11 or later, macOS or Linux, and a local disk. The framework u
 
 3. Open this folder as a project in Codex. If the Codex CLI is installed, run `codex app .`. Start one primary chat and select `gpt-6.2-sol`. Before giving it work, record the chat ID in the bot’s local `bot.json` under `primary_thread` and set `lifecycle` to `active`. Copy the ID from the chat link. The project needs approved access to the fleet CLI two directories above it.
 
-   To receive completed work automatically, tell the Chief, “I authorize temporary workers for my assignments to send this primary chat one completion message with their result or failure evidence.” Have it save a reference to your instruction in the local manifest as `completion_authorization`. See [worker notifications](dispatch.md#notify-the-chief-when-work-finishes).
+   To receive completed work automatically, tell the Chief, “I authorize temporary workers for my assignments to send this primary chat one completion message with the dispatch key, outcome and a concise verification summary.” Have the Chief save the exact chat, turn and user message reference in the local manifest as `completion_authorization`. See [worker notifications](dispatch.md#notify-the-chief-when-work-finishes).
 
 4. Ask the new chat: “Read your project instructions. Remember that I prefer a one-sentence verdict at the start of a briefing. Save it as an operator preference with this request as evidence.” Inspect what it saved.
 

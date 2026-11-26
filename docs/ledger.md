@@ -20,6 +20,8 @@ Use `--blocker`, `--milestone`, `--agent`, `--human yes`, and `--next-action` to
 
 A workload goes from proposed to ready, then running. A running workload can enter waiting, blocked, parked, unknown, completed or failed. Resume waiting or blocked work as ready or running. Triage unknown work before marking an outcome. A failed workload can return to ready. A completed workload retains its final result.
 
+Before starting or resuming work that needs permissions, use [permission preflight](dispatch.md#permission-preflight). Record requests and decisions with `workload permissions ID`. Required requests must be approved before the transition to running. A rejected transition preserves the workload revision. For workloads delegated to another chat, complete the dispatch preflight before launching or handing off the work as well.
+
 ## Close work against a checked result
 
 Configure an authorized test runner or artifact verifier to place its result in the bot's `evidence/` directory. The receipt is a local JSON file containing the exact item ID, kind, registered completion criterion, producer run ID and outcome. Example producer output follows.
