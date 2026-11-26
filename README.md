@@ -1,6 +1,8 @@
 # CodexOS
 
-CodexOS turns a Codex project into an always-on assistant that helps you manage your day. You give it tasks in one main chat and choose when it checks in. Once you set up a schedule, it can start your morning with what’s due, flag a new blocker in a project report you’ve connected, and carry unfinished work into tomorrow. You can also hand it a longer job and keep using the main chat while a worker takes care of it.
+If you want an always-on assistant like Grokbot, you can build one in the Codex setup you already use. CodexOS brings the pieces together in one project. You get a chat you can return to, a memory that lasts between chats, and scheduled routines that follow up on your work. All of this runs through Codex, so you can use it even if you don’t have access to a separate assistant service.
+
+You give it tasks in one main chat and choose when it checks in. Once you set up a schedule, it can start your morning with what’s due, flag a new blocker in a project report you’ve connected, and carry unfinished work into tomorrow. You can also hand it a longer job and keep using the main chat while a worker takes care of it.
 
 The assistant learns from the work you track together and the feedback you give it. For example, tell it, “Put decisions I need to make at the top of my morning briefing.” It can save that preference in the project and use it in future briefings, even after you start a fresh chat. You can inspect what it remembers and correct it when your priorities change.
 
