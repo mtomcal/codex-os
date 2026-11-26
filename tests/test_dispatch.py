@@ -63,6 +63,84 @@ class DispatchTest(unittest.TestCase):
         self.dispatch("report", "parser", "--evidence", "Changed claim", rejected=True)
         self.assertFalse(self.dispatch(*self.request)["launch"])
 
+    def test_add_requirement_reuses_the_bound_worker(self):
+        allocations = []
+
+        def allocate(reservation):
+            if reservation["launch"]:
+                worker_id = f"worker-{len(allocations) + 1}"
+                allocations.append(self.dispatch("bind", reservation["key"], worker_id)["worker"])
+
+        allocate(self.dispatch(*self.request))
+        active, = self.dispatch("list", "--active")
+        extra = ("reserve", "parser-whitespace", *self.request[2:],
+                 "--reuse", active["key"], "--requirement", "Cover whitespace-only input")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            reservations = list(pool.map(lambda _: self.dispatch(*extra), range(3)))
+        for reservation in reservations:
+            allocate(reservation)
+            self.assertEqual((reservation["parent"], reservation["worker"]), ("parser", "worker-1"))
+        self.assertEqual(allocations, ["worker-1"])
+        self.assertEqual(len(self.dispatch("list")), 1)
+        self.assertEqual(self.dispatch("show", "parser")["additions"][0]["requirement"],
+                         "Cover whitespace-only input")
+        self.assertEqual(self.cli("heartbeat")["pending_handoffs"][0]["handoff"], "pending")
+
+        claim = ("handoff", "parser-whitespace", "--claim", "Operator message authorizing reuse")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            claims = list(pool.map(lambda _: self.dispatch(*claim), range(3)))
+        self.assertEqual(sum(row["send"] for row in claims), 1)
+        self.assertEqual({(row["host"], row["worker"]) for row in claims}, {("local", "worker-1")})
+        self.assertEqual(self.cli("heartbeat")["pending_handoffs"][0]["handoff"], "sending")
+        self.dispatch("handoff", "parser-whitespace", "--reset", "Native tool confirmed no send")
+        self.assertTrue(self.dispatch(*claim)["send"])
+        sent = ("handoff", "parser-whitespace", "--sent", "Confirmed in worker-1")
+        self.assertEqual(self.dispatch(*sent), self.dispatch(*sent))
+        self.assertFalse(self.dispatch(*claim)["send"])
+        self.assertEqual(self.cli("heartbeat")["pending_handoffs"], [])
+        self.dispatch("report", "parser", "--evidence", "Verified both parser inputs")
+        self.assertFalse(self.dispatch(*extra)["launch"])
+        self.assertEqual(self.dispatch("show", "parser-whitespace")["handoff"], "sent")
+        self.dispatch(*extra[:-1], "Different requirement", rejected=True)
+        self.dispatch(*extra[:6], rejected=True)
+
+    def test_nonmatching_scope_reserves_a_separate_worker(self):
+        first = self.dispatch(*self.request)
+        self.assertEqual(self.dispatch("list", "--active"), [])
+        second_request = ("reserve", "parser-config", "--objective", "Fix empty input",
+                          "--scope", "Approved config fixture only")
+        attempted_reuse = (*second_request, "--reuse", "parser",
+                           "--requirement", "Change the config fixture")
+        self.assertIn("bound worker", self.dispatch(*attempted_reuse, rejected=True))
+        self.dispatch("bind", first["key"], "worker-1")
+        self.assertIn("exact objective and scope", self.dispatch(*attempted_reuse, rejected=True))
+        second = self.dispatch(*second_request)
+        self.dispatch("bind", second["key"], "worker-2")
+        self.assertEqual(sum(row["launch"] for row in (first, second, self.dispatch(*second_request))), 2)
+        self.assertEqual({row["worker"] for row in self.dispatch("list", "--active")},
+                         {"worker-1", "worker-2"})
+        self.assertEqual(self.cli("heartbeat")["pending_handoffs"], [])
+
+    def test_pending_handoff_survives_worker_completion(self):
+        self.dispatch(*self.request)
+        self.dispatch("bind", "parser", "worker-1")
+        extra = ("reserve", "parser-whitespace", *self.request[2:],
+                 "--reuse", "parser", "--requirement", "Cover whitespace-only input")
+        self.dispatch(*extra)
+        self.dispatch("report", "parser", "--evidence", "Original result")
+        self.dispatch("review", "parser", "--decision", "accept", "--evidence", "Verified original result")
+        self.dispatch("cleaned", "parser", "--evidence", "Worker archived")
+        on_retry = self.dispatch(*extra)
+        self.assertEqual((on_retry["launch"], on_retry["worker"], on_retry["handoff"]),
+                         (False, "worker-1", "pending"))
+        self.assertEqual(self.dispatch("list", "--active"), [])
+        self.assertIn("no longer running", self.dispatch(
+            "handoff", "parser-whitespace", "--claim", "Operator message", rejected=True))
+        self.assertEqual(self.cli("heartbeat")["pending_handoffs"], [{
+            "key": "parser-whitespace", "parent": "parser", "handoff": "pending",
+            "state": "cleaned", "host": "local", "worker": "worker-1",
+        }])
+
     def test_absent_worker_keeps_failure_disposition(self):
         self.dispatch(*self.request)
         self.dispatch("abandon", "parser", "--evidence", "No worker exists after native lookup")
