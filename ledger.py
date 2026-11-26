@@ -324,6 +324,13 @@ def strategic(db):
     return rows or None
 
 
+def preferences(db):
+    return [dict(row) for row in db.execute("""SELECT key,content,source,evidence,rev
+        FROM ledger_memory WHERE category='preference' AND source='operator'
+        AND status='active' AND (expires IS NULL OR expires>?)
+        ORDER BY verified DESC,key LIMIT 100""", (now(),))]
+
+
 def memory(db, args, bot):
     if getattr(args, "quiet", False):
         manifest = json.loads((bot / "bot.json").read_text(encoding="utf-8"))
@@ -332,10 +339,7 @@ def memory(db, args, bot):
         if args.action == "add" and args.category not in {"preference", "fact", "lesson"}:
             raise ValueError("Quiet memory captures preferences, facts and lessons")
     if args.action == "preferences":
-        return [dict(row) for row in db.execute("""SELECT key,content,source,evidence,rev
-            FROM ledger_memory WHERE category='preference' AND source='operator'
-            AND status='active' AND (expires IS NULL OR expires>?)
-            ORDER BY verified DESC,key LIMIT 100""", (now(),))]
+        return preferences(db)
     if args.action == "list":
         return [dict(r) for r in db.execute("""SELECT * FROM ledger_memory
             WHERE (? OR status!='archived') AND (? IS NULL OR key=?) ORDER BY key,rev DESC LIMIT 100""",

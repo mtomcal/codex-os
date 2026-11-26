@@ -42,6 +42,39 @@ def briefing(db, period):
     return {"period": period, "findings": findings, "verified_outcomes": outcomes, "work": work}
 
 
+def recover(db, args, bot):
+    def read(filename):
+        path = bot / filename
+        if path.resolve() != path or not path.is_file():
+            raise ValueError(f"Restore the local bot file {filename}")
+        return path.read_text(encoding="utf-8")
+
+    if (bot / "bot.json").is_symlink():
+        raise ValueError("Restore the local bot file bot.json")
+    manifest = fleet._record(bot)
+    state = scheduled.primary_state(db, args, manifest)
+    startup = {name: read(name) for name in ("SOUL.md", "USER.md", "MEMORY.md")}
+    routine = None
+    if args.routine:
+        filename = f"routines/{args.routine}.md"
+        if not any(entry.get("id") == args.routine and entry.get("file") == filename
+                   for entry in manifest.get("routines", [])):
+            raise ValueError("Use a registered routine")
+        routine = {"file": filename, "contents": read(filename)}
+
+    schedule = None
+    config = scheduled.plan(bot, manifest)
+    if config is not None:
+        revision = config["revision"]
+        binding = db.execute(
+            "SELECT 1 FROM schedule_binding WHERE slot=1 AND plan=? AND chat=?",
+            (revision, args.chat),
+        ).fetchone()
+        schedule = {"revision": revision, "bound": binding is not None}
+    return {"bot": manifest, "startup": startup, "preferences": ledger.preferences(db),
+            "routine": routine, "schedule": schedule, **state}
+
+
 def main(argv=None, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bot", help="Bot project ID (defaults to the current bot, or chief-of-staff)")
@@ -70,6 +103,8 @@ def main(argv=None, root=ROOT):
             return {"bot": bot.name, "database": str(folder / "agent.sqlite3"),
                     "integrity": db.execute("PRAGMA quick_check").fetchone()[0],
                     "sources": db.execute("SELECT count(*) FROM monitor_sources").fetchone()[0]}
+        if args.command == "state" and args.operation == "recover":
+            return recover(db, args, bot)
         if args.command in {"schedule", "state"}:
             return scheduled.run(db, args, bot)
         if args.command == "dispatch":

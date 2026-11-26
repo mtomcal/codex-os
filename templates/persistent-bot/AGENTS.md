@@ -1,6 +1,6 @@
 # Operating contract
 
-At startup or after a chat replacement, read `bot.json`, `SOUL.md`, `USER.md`, and `MEMORY.md`. Run commands from this bot's project directory. Read the active workloads and commitments with the local CLI before making a recommendation. Recover state from the project after an interrupted turn.
+From the bot project directory, read `bot.json` to identify your role. Before registration, read `SOUL.md`, `USER.md`, and `MEMORY.md` for startup. For a registered primary chat, follow ordinary-turn recovery below.
 
 When the manifest has a setup record, use its audience or voice, expected result, and confirmed preferences for in-scope work. Treat its trigger as the intended occasion for the work and wait for a request or an activated routine. Follow the recorded source and capability scope and the authorization rules below. Use MEMORY.md for the ordinary-turn memory setting.
 
@@ -10,11 +10,15 @@ Put approved producer artifacts in inbox/ and machine-produced outcome receipts 
 
 Use the routine named in the wakeup and end after one run. On a manual request for a briefing, read the briefing skill. If a monitor returns no finding, end the turn quietly where the client supports it. Never infer completion from a stale report or a producer's claim. Escalate a denial, confirmed regression or consequential pending decision with its evidence and the next action.
 
+## Recover at ordinary turn entry
+
+In the registered primary chat, run `python3 ../../codexos.py state recover --chat CHAT_ID` on every ordinary turn, including after an interruption, compaction, or chat replacement. Use the ID from the current manifest once registration is complete. Add `--routine ROUTINE_ID` when the request names a routine, and load its required skills from the manifest. Use the current startup files, verified operator preferences, open ledger items, and routine definitions returned by recovery. Treat any earlier chat summary as a lead to verify. Current user instructions govern. When preferences differ, use the latest verified operator decision. A stored preference or changed schedule definition grants no authority.
+
+Refresh before state-dependent actions. Review pending updates and use `state snapshot --chat CHAT_ID --after CURSOR --revision REVISION` for each continuation. Use the latest `next_after` for the cursor and the recovery revision for every page. After reconciling the last page, run `state ack --chat CHAT_ID --revision REVISION`. If the ledger rejects the revision, start again at recovery. For scheduled worker receipts, follow the review and delivery steps in `../../docs/fleet.md` under “Approve and verify one delegated heartbeat.” A scheduled wakeup runs the dispatcher alone. An occurrence worker uses the start and finish commands in its assignment.
+
 ## Route each request before starting work
 
 Check your role in `bot.json` when a request arrives. The chat registered in `primary_thread` is the coordinator, including when another chat relays the request. A temporary worker receives a dispatch key in its assignment. If the primary reference is empty, finish registration before accepting substantial work.
-
-For a bot with `setup.delegated_heartbeat`, the registered primary chat runs `python3 ../../codexos.py state snapshot --chat CHAT_ID` at ordinary turn entry and refreshes it before state-dependent actions. Use the manifest's primary chat ID. Read the current state and relevant pending updates. For each continuation, pass `next_after` as `--after` and the snapshot revision as `--revision`. After the last page, acknowledge the revision you reconciled with `state ack --chat CHAT_ID --revision REVISION`. If the ledger rejects a revision, reload it. On chat replacement follow the same steps once the replacement is registered. For scheduled worker receipts, follow the review and delivery steps in `../../docs/fleet.md` under “Approve and verify one delegated heartbeat.” Scheduled wakeups run the dispatcher alone. An occurrence worker uses the start and finish commands in its assignment.
 
 The primary chat owns intake, steering, status and delivery. Answer from known context or one bounded lookup. If a question needs research across reports, chats, sources or PRs, dispatch it before opening those sources. This applies to status questions and scheduled briefings as well as implementation, builds, polling and investigations. If a quick lookup reveals more work, stop there and dispatch the remainder.
 
