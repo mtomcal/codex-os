@@ -19,3 +19,9 @@ __pycache__/
 /acceptance/APPROVAL.md
 /acceptance/maintainer/proof-*.json
 /architecture/capability-matrix.md
+
+*.log
+*.jsonl
+.venv/
+.vscode/
+.idea/
