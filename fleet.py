@@ -82,7 +82,7 @@ def _record(directory):
 def _setup(path):
     data = json.loads(path.read_text(encoding="utf-8"))
     fields = {"audience", "voice", "trigger", "result", "preferences", "approval",
-              "approved_sources", "capabilities", "quiet_memory"}
+              "approved_sources", "capabilities", "quiet_memory", "heartbeat"}
     if not isinstance(data, dict) or data.keys() - fields:
         raise ValueError("Use the setup fields documented in docs/fleet.md")
 
@@ -97,6 +97,15 @@ def _setup(path):
             setup[field] = line(data[field], field)
     if "audience" not in setup and "voice" not in setup:
         raise ValueError("Setup needs an audience or a voice")
+
+    if "heartbeat" in data:
+        heartbeat = data["heartbeat"]
+        heartbeat_fields = ("cadence", "window", "timezone")
+        if heartbeat is not None:
+            if not isinstance(heartbeat, dict) or heartbeat.keys() != set(heartbeat_fields):
+                raise ValueError("Setup heartbeat must be null or contain cadence, window and timezone")
+            heartbeat = {field: line(heartbeat[field], f"heartbeat.{field}") for field in heartbeat_fields}
+        setup["heartbeat"] = heartbeat
 
     def lines(field):
         values = data.get(field, [])
@@ -136,6 +145,13 @@ def _create(root, identifier, name, mission, parent, *, setup=None, bootstrap=Fa
     if target.exists() or target.is_symlink():
         return existing()
     routines = list(CADENCE) if identifier == CHIEF else ["heartbeat", "reflect"]
+    proposed_cadence = {key: CADENCE[key] for key in routines}
+    if setup is not None and "heartbeat" in setup["setup"]:
+        heartbeat = setup["setup"]["heartbeat"]
+        if heartbeat is None:
+            del proposed_cadence["heartbeat"]
+        else:
+            proposed_cadence["heartbeat"] = heartbeat["cadence"]
     manifest = {
         "version": 1, "model": "gpt-6.2-sol", "id": identifier, "name": name, "mission": mission,
         "parent": parent, "lifecycle": "proposed", "primary_thread": None,
@@ -144,7 +160,8 @@ def _create(root, identifier, name, mission, parent, *, setup=None, bootstrap=Fa
         "approved_sources": [], "capabilities": ["read approved local evidence", "write project reports"],
         "max_delegation_depth": int(identifier == CHIEF),
         "escalation": ["access denied", "verified regression", "decision required"],
-        "routines": [{"id": key, "proposed_cadence": CADENCE[key], "file": f"routines/{key}.md"} for key in routines],
+        "routines": [{"id": key, "proposed_cadence": cadence, "file": f"routines/{key}.md"}
+                     for key, cadence in proposed_cadence.items()],
     }
     if setup is not None:
         manifest.update({field: setup[field] for field in ("setup", "approved_sources", "capabilities")})

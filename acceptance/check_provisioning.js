@@ -99,7 +99,7 @@ async function check() {
     const choices = {
         audience: "Release leads",
         voice: "Lead with the outcome",
-        trigger: "On request",
+        trigger: "On request and during an authorized heartbeat",
         result: "A release brief with evidence",
         preferences: ["Use Phoenix time"],
         approval: "fixture-approval-turn",
@@ -109,13 +109,22 @@ async function check() {
         capabilities: ["Read approved release evidence"],
     };
     const setupFile = join(chief, "state/setup.json");
-    const confirmed = {...choices, ...scope, quiet_memory: "approved"};
+    const heartbeat = {
+        cadence: "Every 15 minutes",
+        window: "Monday through Friday, 09:00–17:00",
+        timezone: "America/Phoenix",
+    };
+    const confirmed = {...choices, ...scope, quiet_memory: "approved", heartbeat};
     const saveSetup = setup => writeFileSync(setupFile, JSON.stringify(setup));
     saveSetup(confirmed);
     const trial = scenario("delivery-tracker", setupFile);
     const retry = [...createArgs("delivery-tracker"), "--setup", setupFile];
+    trial.proposed();
     assert.deepEqual(cli(...retry), trial.manifest());
-    assert.deepEqual(trial.manifest().setup, choices);
+    assert.deepEqual(trial.manifest().setup, {...choices, heartbeat});
+    assert.deepEqual(trial.manifest().routines.find(routine => routine.id === "heartbeat"), {
+        id: "heartbeat", proposed_cadence: heartbeat.cadence, file: "routines/heartbeat.md",
+    });
     for (const [field, value] of Object.entries(scope)) assert.deepEqual(trial.manifest()[field], value);
     assert.equal(trial.manifest().memory.quiet, "approved");
     assert.match(readFileSync(join(trial.project.path, "AGENTS.md"), "utf8"), /use its audience or voice/);
@@ -135,13 +144,33 @@ async function check() {
 
     const denied = scenario("declined-memory", setupFile);
     assert.equal(denied.manifest().memory.quiet, "denied");
+    const alternateHeartbeat = {...heartbeat, cadence: "Every 45 minutes"};
+    saveSetup({...confirmed, heartbeat: alternateHeartbeat});
+    invalidCLI(retry, /already belongs to a different setup/);
+    const alternate = scenario("alternate-heartbeat", setupFile);
+    assert.deepEqual(alternate.manifest().setup.heartbeat, alternateHeartbeat);
+    assert.equal(alternate.manifest().routines.find(routine => routine.id === "heartbeat").proposed_cadence,
+        alternateHeartbeat.cadence);
+    const manualSetup = {...choices, trigger: "On request", heartbeat: null};
+    saveSetup(manualSetup);
+    const manual = scenario("manual-only", setupFile);
+    manual.proposed();
+    assert.equal(manual.manifest().setup.heartbeat, null);
+    assert.equal(manual.manifest().routines.some(routine => routine.id === "heartbeat"), false);
+    assert.ok(readFileSync(join(manual.project.path, "routines/heartbeat.md"), "utf8"));
+    assert.deepEqual(cli(...createArgs("manual-only"), "--setup", setupFile), manual.manifest());
     saveSetup(choices);
     const unspecified = scenario("unspecified-memory", setupFile);
+    assert.equal(Object.hasOwn(unspecified.manifest().setup, "heartbeat"), false);
+    assert.equal(unspecified.manifest().routines.find(routine => routine.id === "heartbeat").proposed_cadence,
+        "Every 30 minutes during agreed weekday working hours");
     assert.equal(unspecified.manifest().memory.quiet, "unspecified");
     assert.deepEqual(unspecified.manifest().capabilities, []);
     assert.deepEqual(unspecified.manifest().approved_sources, []);
     saveSetup({...choices, quiet_memory: true});
     invalidCLI([...createArgs("invalid-approval"), "--setup", setupFile], /quiet_memory must be approved, denied or unspecified/);
+    saveSetup({...choices, heartbeat: {cadence: heartbeat.cadence}});
+    invalidCLI([...createArgs("invalid-heartbeat"), "--setup", setupFile], /heartbeat must be null or contain cadence, window and timezone/);
     unlinkSync(setupFile);
 
     for (const id of ["declined-memory", "unspecified-memory", "memory-lab"]) {
@@ -233,7 +262,7 @@ async function check() {
     assert.equal(startup.sources, 0);
     assert.equal((await trial.run()).status, "active");
     trial.active();
-    assert.deepEqual(trial.manifest().setup, choices);
+    assert.deepEqual(trial.manifest().setup, {...choices, heartbeat});
     assert.equal(trial.manifest().memory.quiet, "approved");
     trial.plan.answer = "A later conversation reply";
     assert.equal((await trial.run()).status, "active");
