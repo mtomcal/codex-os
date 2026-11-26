@@ -3,11 +3,12 @@
     if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id) || id.length > 64)
         throw Error("Select a valid specialist bot ID");
 
-    async function cli(flag, chatId, scheduleArgs) {
+    const shellArg = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    async function cli(flag, chatId, scheduleArgs, baselineArgs = []) {
         if (chatId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(chatId))
             throw Error("Invalid native chat ID");
         const cmd = scheduleArgs ? ["python3 ../../codexos.py --bot", id, "schedule", ...scheduleArgs].join(" ") :
-            ["python3 ../../codexos.py provision-bot", id, flag, chatId].filter(Boolean).join(" ");
+            ["python3 ../../codexos.py provision-bot", id, flag, chatId, ...baselineArgs].filter(Boolean).join(" ");
         const approval = flag === "--activate" && approveManifestWrite ? {
             sandbox_permissions: "require_escalated",
             justification: "May I save the verified main chat and active status in this specialist's local bot manifest?",
@@ -134,11 +135,15 @@
             ].join("\n");
             const details = {...main, routineId, revision, evidenceFile: plan.evidence_file};
             try {
-                if (!reference(review.manual_review) || !reference(review.manual_turn) ||
-                    !successfulRun(await findTurn(review.manual_turn), prompt, marker, false))
+                const reviewed = reference(review.manual_review) && reference(review.manual_turn);
+                if (!reviewed || (routine.verified_baseline_project !== projectId &&
+                    !successfulRun(await findTurn(review.manual_turn), prompt, marker, false)))
                     return status("manual_baseline_pending",
                         "Review and record the baseline in the verified main chat. Run the prompt once if the baseline is missing.",
                         {...details, prompt});
+                if (routine.verified_baseline_project !== projectId)
+                    await cli("--confirm-baseline", chatId, undefined,
+                        [projectId, routineId, revision, review.manual_turn].map(shellArg));
                 if (!schedule) continue;
 
                 const scheduledPrompt = [
@@ -188,6 +193,8 @@
             if (binding.automation !== saved.id || binding.plan !== revision || binding.chat !== chatId ||
                 binding.project !== projectId || !/^[a-f0-9]{32}$/.test(binding.generation))
                 return status("schedule_binding_pending", "Record the verified heartbeat with the fleet CLI.", {...details, automationId: saved.id});
+            if (reference(saved.first_review) && reference(saved.first_turn) && binding.verified_turn === saved.first_turn)
+                return status("ready", null, {...main, setupReady: true});
             try {
                 const turn = typeof saved.first_turn === "string" && /^[a-z0-9][a-z0-9._-]{0,79}$/.test(saved.first_turn)
                     && await findTurn(saved.first_turn);

@@ -46,10 +46,10 @@ function scenario(id, setupFile) {
     const tools = {
         async exec_command({cmd, workdir}) {
             assert.equal(workdir, chief);
-            const [interpreter, script, ...args] = cmd.split(" ");
-            assert.equal(interpreter, "python3");
-            assert.equal(script, "../../codexos.py");
-            return {exit_code: 0, output: JSON.stringify(cli(...args))};
+            assert.match(cmd, /^python3 \.\.\/\.\.\/codexos\.py /);
+            const output = execFileSync("/bin/sh", ["-c", 'exec "$1" ' + cmd.slice("python3 ".length),
+                "provision-fixture", python], {cwd: workdir, encoding: "utf8"});
+            return {exit_code: 0, output};
         },
         async mcp__codex_app__list_projects() {
             if (plan.projectListUnavailable) throw Error("Native project list unavailable");
@@ -100,7 +100,7 @@ function scenario(id, setupFile) {
     return {plan, project, chat, manifest, saveManifest, proposed, active, run: () => provisionBot(tools, chief, id)};
 }
 
-async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, manualTurn}) {
+async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, manualTurn}, expiry = false) {
     const dispatchWindow = {days: ["mon", "fri"], start: "16:30", end: "18:00"};
     const friday = (start, end) => ({days: ["fri"], start, end});
     const workloads = [
@@ -113,7 +113,8 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
         delegated_heartbeat: {window: dispatchWindow, timezone: "America/Phoenix", catch_up_hours: 96, scope: "Read synthetic evidence."},
     };
     saveSetup(delegated);
-    const dispatcher = scenario("delegated", setupFile);
+    const botId = expiry ? "delegated-expiry" : "delegated";
+    const dispatcher = scenario(botId, setupFile);
     const projectDir = dispatcher.project.path;
     for (const name of ["arrival", "late-friday"])
         writeFileSync(join(projectDir, "routines", name + ".md"), "Exercise a disposable workload.\n");
@@ -178,6 +179,8 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     let archiveVisible = true;
     let launchMode = "ready";
     let failedCommand;
+    let requestTime;
+    let requestResult;
     let hiddenWorker;
     let conflictingChats = [];
     let denyLaunch = false;
@@ -193,7 +196,13 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
                 failedCommand = undefined;
                 return {exit_code: 1, output: "Fixture transient CLI failure"};
             }
+            const requesting = args.slice(0, 2).join(" ") === "schedule request-worker";
+            if (requesting && requestTime) {
+                advance(requestTime);
+                requestTime = undefined;
+            }
             const result = await promisify(execFile)(python, [...pythonArgs, ...args], options());
+            if (requesting) requestResult = JSON.parse(result.stdout);
             return {exit_code: 0, output: result.stdout};
         },
         async mcp__codex_app__list_projects() { return reply({projects: [nativeProject]}); },
@@ -262,6 +271,70 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     bind(saved.id);
     bind(saved.id);
     assert.throws(() => bind("duplicate-heartbeat"), /different native schedule/);
+    if (expiry) {
+        const attempts = id => runCLI("schedule", "attempts", id);
+        const occurrence = id => snapshot().occurrences.find(row => row.id === id);
+        const start = job => runCLI("schedule", "start", job.occurrence, job.token);
+        const {id: event} = runCLI("schedule", "ready", "arrival", "old-event", "--evidence", "approved fixture");
+        advance("2026-11-28T00:00:00Z");
+        failedCommand = "schedule request-worker";
+        await assert.rejects(pulse, /Fixture transient CLI failure/);
+        const oldCalendar = snapshot().occurrences.find(row => row.routine === "weekly-review");
+        assert.equal(oldCalendar.state, "launching");
+        assert.equal(occurrence(event).state, "launching");
+        assert.equal(attempts(oldCalendar.id)[0].launch_requested, null);
+        assert.equal(launches.length, 0);
+
+        advance("2026-12-05T00:00:00Z");
+        await pulse();
+        assert.equal(occurrence(oldCalendar.id).state, "expired");
+        assert.equal(attempts(oldCalendar.id)[0].launch_requested, null);
+        assert.equal(launches.length, 2);
+        assert.equal(launches[0].occurrence, event);
+        assert.equal(start(launches[0]).evidence, "approved fixture");
+        const fresh = occurrence(launches[1].occurrence);
+        assert.equal(fresh.routine, oldCalendar.routine);
+        assert.equal(fresh.due - oldCalendar.due, 7 * 86400);
+
+        // Advance after tick returns its claim and before the adapter requests a native launch.
+        advance("2026-12-05T00:55:00Z");
+        requestTime = "2026-12-09T00:55:01Z";
+        await pulse();
+        assert.deepEqual(requestResult, {launch: false});
+        assert.equal(launches.length, 2);
+        const stale = snapshot().occurrences.find(row => row.routine === "late-friday");
+        assert.equal(clock - stale.due, 96 * 3600 + 1);
+        assert.equal(stale.state, "expired");
+        assert.equal(attempts(stale.id)[0].launch_requested, null);
+
+        advance("2026-12-12T00:55:00Z");
+        requestTime = "2026-12-16T00:55:00Z";
+        failedCommand = "schedule bind-worker";
+        await assert.rejects(pulse, /Fixture transient CLI failure/);
+        assert.deepEqual(requestResult, {launch: true});
+        assert.equal(launches.length, 3);
+        const exact = launches.at(-1);
+        assert.equal(clock - occurrence(exact.occurrence).due, 96 * 3600);
+        assert.equal(attempts(exact.occurrence)[0].launch_requested, clock);
+        assert.equal(attempts(exact.occurrence)[0].worker, null);
+        advance("2026-12-19T00:55:00Z");
+        await Promise.all([pulse(), pulse()]);
+        assert.equal(launches.length, 3);
+        assert.equal(attempts(exact.occurrence)[0].worker, exact.worker);
+        assert.deepEqual(runCLI("schedule", "request-worker", exact.occurrence, exact.token), {launch: false});
+        assert.equal(start(exact).start, true);
+        runCLI("schedule", "finish", exact.occurrence, exact.token, "--decision", "done",
+            "--evidence", "recovered fixture receipt");
+        advance("2026-12-19T00:56:00Z");
+        const {work: [unrequested]} = runCLI("schedule", "tick", "--automation", saved.id,
+            "--project", projectId, "--chat", chatId);
+        assert.equal(unrequested.routine, "late-friday");
+        advance("2026-12-23T00:55:01Z");
+        assert.deepEqual(runCLI("schedule", "start", unrequested.id, unrequested.token), {start: false});
+        assert.equal(occurrence(unrequested.id).state, "expired");
+        assert.equal(attempts(unrequested.id)[0].launch_requested, null);
+        return;
+    }
     assert.equal((await dispatcher.run()).status, "first_run_pending");
     await assert.rejects(() => desktopHeartbeat(desktop, projectDir, {automationId: "duplicate-heartbeat"}), /approved native schedule/);
     nativeProject = {...nativeProject, projectId: "wrong"};
@@ -321,6 +394,25 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.equal((await dispatcher.run()).status, "ready");
     assert.equal(await pulse(), null);
     assert.equal(dispatcher.plan.launchCount, 1);
+
+    // Each provision call starts a fresh CLI process against the same persisted fleet.
+    assert.equal(runCLI("schedule", "status").verified_turn, laterTick.id);
+    dispatcher.plan.routineTurns = dispatcher.plan.routineTurns.filter(turn => turn.id !== laterTick.id);
+    assert.equal((await dispatcher.run()).status, "ready");
+    dispatcher.plan.routineTurns = [];
+    dispatcher.plan.routineHistoryUnavailable = true;
+    assert.equal((await dispatcher.run()).status, "ready");
+    dispatcher.plan.routineHistoryUnavailable = false;
+    saved.first_turn = "unverified-turn";
+    saveDispatcher(proposal);
+    assert.equal((await dispatcher.run()).status, "first_run_pending");
+    saved.first_turn = laterTick.id;
+    saved.first_review = "";
+    saveDispatcher(proposal);
+    assert.equal((await dispatcher.run()).status, "first_run_pending");
+    saved.first_review = "reviewed ledger tick";
+    saveDispatcher(proposal);
+    assert.equal((await dispatcher.run()).status, "ready");
 
     const old = snapshot();
     ack(old.revision);
@@ -765,13 +857,30 @@ async function check() {
     const review = {manual_turn: "baseline-turn", manual_review: "reviewed-baseline"};
     saveEvidence(trial, baseline, review);
     assert.equal((await trial.run()).status, "manual_baseline_pending");
-    trial.plan.routineTurns = [manualTurn(baseline, review.manual_turn)];
+    const completedBaseline = manualTurn(baseline, review.manual_turn);
+    trial.plan.routineTurns = [{...completedBaseline, nextItemCursor: "unread-items"}];
+    assert.equal((await trial.run()).status, "manual_baseline_pending");
+    trial.plan.routineTurns = [completedBaseline];
     trial.plan.routineHistoryUnavailable = true;
     assert.equal((await trial.run()).status, "routine_history_pending");
     trial.plan.routineHistoryUnavailable = false;
 
     const permission = await trial.run();
     assert.equal(permission.status, "schedule_approval_pending");
+    const baselineHistory = trial.plan.routineTurns;
+    trial.plan.routineTurns = [];
+    assert.equal((await trial.run()).status, "schedule_approval_pending");
+    const originalProjectId = trial.project.projectId;
+    trial.project.projectId = trial.chat.projectId = "different-project";
+    assert.equal((await trial.run()).status, "manual_baseline_pending");
+    trial.project.projectId = trial.chat.projectId = originalProjectId;
+    review.manual_turn = "replacement-turn";
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "manual_baseline_pending");
+    review.manual_turn = "baseline-turn";
+    saveEvidence(trial, baseline, review);
+    assert.equal((await trial.run()).status, "schedule_approval_pending");
+    trial.plan.routineTurns = baselineHistory;
     assert.deepEqual(permission.schedule, heartbeat);
     assert.match(permission.scheduledPrompt, /End quietly/);
     review.schedule = {approval: "operator-schedule-approval"};
@@ -811,7 +920,14 @@ async function check() {
     assert.equal(trial.manifest().memory.quiet, "approved");
 
     writeFileSync(requiredSkill, Buffer.concat([skillContents, Buffer.from("\nNew revision.\n")]));
+    const changedBaseline = await trial.run();
+    assert.equal(changedBaseline.status, "manual_baseline_pending");
+    assert.notEqual(changedBaseline.revision, baseline.revision);
+    trial.plan.routineTurns = [completedBaseline];
+    saveEvidence(trial, changedBaseline, review);
     assert.equal((await trial.run()).status, "manual_baseline_pending");
+    saveEvidence(trial, baseline, review);
+    trial.plan.routineTurns = [completedBaseline, scheduled];
     writeFileSync(requiredSkill, skillContents);
     assert.equal((await trial.run()).status, "ready");
 
@@ -837,6 +953,7 @@ async function check() {
     assert.equal(manualRoutine.plan.launchCount, 1);
 
     await checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, manualTurn});
+    await checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, manualTurn}, true);
 
     const lost = scenario("lost-acknowledgement");
     lost.plan.loseLaunchReply = true;

@@ -51,6 +51,9 @@ def commands(subparsers):
     operations.add_argument("--reserve", action="store_true")
     operations.add_argument("--remember", metavar="CHAT_ID")
     operations.add_argument("--activate", metavar="VERIFIED_CHAT_ID")
+    operations.add_argument("--confirm-baseline", nargs=5,
+                            metavar=("CHAT", "PROJECT", "ROUTINE", "REVISION", "TURN"),
+                            help="Record a baseline verified by the desktop provisioner")
     subparsers.add_parser("fleet-list", help="List local project definitions")
     mail = subparsers.add_parser("mailbox", help="Exchange bounded assignments and evidence")
     actions = mail.add_subparsers(dest="mail_action", required=True)
@@ -363,6 +366,35 @@ def _onboarding(project, chief, bot, thread):
     return result
 
 
+def _baseline_proofs(db, args, onboarding, project, primary, verified):
+    if args.confirm_baseline is None and (not verified or not onboarding or "issue" in onboarding):
+        return
+    db.execute("""CREATE TABLE IF NOT EXISTS bot_baseline_proofs (
+        bot TEXT NOT NULL, routine TEXT NOT NULL, path TEXT NOT NULL, chat TEXT NOT NULL,
+        project TEXT NOT NULL, revision TEXT NOT NULL, turn TEXT NOT NULL,
+        PRIMARY KEY (bot,routine))""")
+    routines = (onboarding or {}).get("routines", [])
+    if args.confirm_baseline is not None:
+        chat, project_id, name, revision, turn = args.confirm_baseline
+        if not verified or chat != primary or not project_id.strip() or not turn.strip() or not any(
+            routine["id"] == name and routine["revision"] == revision
+            and routine["review"].get("manual_turn") == turn
+            and isinstance(routine["review"].get("manual_review"), str)
+            and routine["review"]["manual_review"].strip()
+            for routine in routines
+        ):
+            raise ValueError("Baseline proof must match the verified primary chat and current routine review")
+        db.execute("INSERT OR REPLACE INTO bot_baseline_proofs VALUES (?,?,?,?,?,?,?)",
+                   (args.id, name, str(project), chat, project_id, revision, turn))
+    proofs = {row["routine"]: row for row in db.execute(
+        "SELECT routine,project,revision,turn FROM bot_baseline_proofs WHERE bot=? AND path=? AND chat=?",
+        (args.id, str(project), primary))}
+    for routine in routines:
+        proof = proofs.get(routine["id"])
+        if proof and (proof["revision"], proof["turn"]) == (routine["revision"], routine["review"].get("manual_turn")):
+            routine["verified_baseline_project"] = proof["project"]
+
+
 def provision(db, args, root, chief):
     if chief != root / "bots" / CHIEF:
         raise ValueError("Provision specialists from the Chief of Staff project")
@@ -403,9 +435,12 @@ def provision(db, args, root, chief):
         db.execute("""INSERT INTO bot_provisioning (bot, candidate, verified) VALUES (?, ?, 1)
             ON CONFLICT (bot) DO UPDATE SET candidate=excluded.candidate, verified=1""", (args.id, thread))
         verified = True
+    onboarding = _onboarding(project, chief, bot, thread)
+    _baseline_proofs(db, args, onboarding, project, bot.get("primary_thread"),
+                     verified and bot["lifecycle"] == "active")
     return {"project": str(project), "name": bot["name"], "lifecycle": bot["lifecycle"],
             "primary_thread": bot.get("primary_thread"), "candidate": thread, "verified": verified, "launch": launch,
-            "onboarding": _onboarding(project, chief, bot, thread)}
+            "onboarding": onboarding}
 
 
 def _mailbox(args, root, bot):

@@ -331,15 +331,28 @@ def carry_events(db, config, now):
                 (config["revision"], now, config["revision"], routine["id"]))
 
 
+def calendar_cutoff(config, binding, now):
+    return max(binding["approved_at"], now - config["catch_up_hours"] * 3600)
+
+
+def expire_calendar_work(db, config, binding, now, occurrence=None):
+    return db.execute("""UPDATE schedule_occurrences SET state='expired',changed=?
+        WHERE plan=? AND event IS NULL AND due<? AND (? IS NULL OR id=?)
+        AND (state='ready' OR (state='launching' AND EXISTS (
+            SELECT 1 FROM schedule_attempts a
+            WHERE a.id=schedule_occurrences.id AND a.attempt=schedule_occurrences.attempt
+            AND a.launch_requested IS NULL)))""",
+        (now, config["revision"], calendar_cutoff(config, binding, now), occurrence, occurrence)).rowcount
+
+
 def tick(db, config, binding, now):
     zone = ZoneInfo(config["timezone"])
-    lower = max(binding["approved_at"], now - config["catch_up_hours"] * 3600)
+    lower = calendar_cutoff(config, binding, now)
     revision = config["revision"]
     carry_events(db, config, now)
     db.execute("""UPDATE schedule_occurrences SET state='expired',changed=?
         WHERE plan<>? AND state='ready'""", (now, revision))
-    db.execute("""UPDATE schedule_occurrences SET state='expired',changed=?
-        WHERE plan=? AND state='ready' AND event IS NULL AND due<?""", (now, revision, lower))
+    expire_calendar_work(db, config, binding, now)
     for routine in config["routines"]:
         if routine["mode"] == "scheduled":
             ready = db.execute("""SELECT count(*) FROM schedule_occurrences
@@ -430,7 +443,7 @@ def save_occurrence(db, row, now, state, receipt, *, worker):
         (state, worker, receipt, now, state, row["id"]))
 
 
-def change_occurrence(db, args, config, now):
+def change_occurrence(db, args, config, binding, now):
     if not ID.fullmatch(args.id):
         raise ValueError("Invalid occurrence ID")
     row = db.execute("SELECT * FROM schedule_occurrences WHERE id=?", (args.id,)).fetchone()
@@ -446,6 +459,9 @@ def change_occurrence(db, args, config, now):
         raise ValueError("Occurrence is outside the active heartbeat plan")
     if hasattr(args, "token") and (not ID.fullmatch(args.token) or args.token != row["token"]):
         raise ValueError("Occurrence claim changed")
+    # A tick's claim can age out before the desktop reaches the native request.
+    if action in {"request-worker", "start"} and expire_calendar_work(db, config, binding, now, row["id"]):
+        return {"launch" if action == "request-worker" else "start": False}
     state, worker, receipt = row["state"], row["worker"], row["receipt"]
     if action == "request-worker":
         requested = db.execute("""UPDATE schedule_attempts SET launch_requested=?
@@ -590,7 +606,7 @@ def run(db, args, bot):
         raise ValueError("Occurrence claim belongs to a previous primary chat")
     if action == "review":
         require_observed(db, chat, args.revision)
-    return change_occurrence(db, args, config, now)
+    return change_occurrence(db, args, config, binding, now)
 
 
 def wakeup(db, bot, manifest):
