@@ -62,6 +62,7 @@ def commands(subparsers):
         subparsers.add_parser(name).add_argument("id")
     subparsers.add_parser("source-list")
     pulse = subparsers.add_parser("heartbeat", help="poll a bounded set of eligible sources")
+    pulse.add_argument("--operations", action="store_true", help="Run the approved operational collector")
     pulse.add_argument("--limit", type=bounded(1, 32), default=8)
     recent = subparsers.add_parser("findings")
     recent.add_argument("--limit", type=bounded(1, 100), default=20)

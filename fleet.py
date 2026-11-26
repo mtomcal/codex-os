@@ -9,6 +9,8 @@ import shutil
 import sqlite3
 import tempfile
 
+import scheduled
+
 
 CHIEF = "chief-of-staff"
 SEEDS = (
@@ -86,20 +88,22 @@ def _line(value, field):
     return value.strip()
 
 
-def _routine_plan(value):
+def _routine_plan(value, *, delegated=False):
     if not isinstance(value, list) or len(value) > 20:
         raise ValueError("Setup routines needs an array of up to 20 entries")
     plan = {}
+    modes = ("manual", "scheduled", "event") if delegated else ("manual", "scheduled")
+    timing_key = "timing" if delegated else "schedule"
     for entry in value:
-        if not isinstance(entry, dict) or entry.keys() - {"id", "mode", "skills", "schedule"}:
+        if not isinstance(entry, dict) or entry.keys() - {"id", "mode", "skills", timing_key}:
             raise ValueError("Use the routine fields documented in docs/fleet.md")
         identifier = entry.get("id")
         mode = entry.get("mode")
         if not isinstance(identifier, str):
             raise ValueError("A routine needs an ID")
         _validate_id(identifier)
-        if identifier in plan or mode not in ("manual", "scheduled"):
-            raise ValueError("Routines need unique IDs and a manual or scheduled mode")
+        if identifier in plan or mode not in modes:
+            raise ValueError("Routines need unique IDs and a mode supported by the heartbeat plan")
         default_skills = {"heartbeat": ["heartbeat"], "reflect": ["consolidate-memory"]}
         skills = entry.get("skills", [])
         if not isinstance(skills, list) or len(skills) > 20 or any(not isinstance(skill, str) for skill in skills):
@@ -110,10 +114,13 @@ def _routine_plan(value):
         if len(skills) > 20:
             raise ValueError("Routine skills can include up to 20 IDs including built-in skills")
         routine = {"id": identifier, "mode": mode, "skills": skills}
+        if delegated and identifier == "heartbeat":
+            raise ValueError("The delegated heartbeat is the dispatcher. List its workloads in routines")
         if mode == "scheduled":
-            routine["schedule"] = _schedule(entry.get("schedule"))
-        elif "schedule" in entry:
-            raise ValueError("A manual routine cannot specify a schedule")
+            validator = scheduled.timing if delegated else _schedule
+            routine[timing_key] = validator(entry.get(timing_key))
+        elif timing_key in entry:
+            raise ValueError("Timing is only available for scheduled routines")
         plan[identifier] = routine
     return list(plan.values())
 
@@ -128,7 +135,7 @@ def _schedule(value):
 def _setup(path):
     data = json.loads(path.read_text(encoding="utf-8"))
     fields = {"audience", "voice", "trigger", "result", "preferences", "approval",
-              "approved_sources", "capabilities", "quiet_memory", "heartbeat", "routines"}
+              "approved_sources", "capabilities", "quiet_memory", "heartbeat", "routines", "delegated_heartbeat"}
     if not isinstance(data, dict) or data.keys() - fields:
         raise ValueError("Use the setup fields documented in docs/fleet.md")
 
@@ -145,11 +152,19 @@ def _setup(path):
                                       heartbeat.keys() != {"cadence", "window", "timezone"}):
             raise ValueError("Setup heartbeat must be null or contain cadence, window and timezone")
         setup["heartbeat"] = None if heartbeat is None else _schedule(heartbeat)
+    delegated = "delegated_heartbeat" in data
+    if delegated:
+        if "heartbeat" in data:
+            raise ValueError("Choose one heartbeat configuration")
+        setup["delegated_heartbeat"] = scheduled.plan_config(data["delegated_heartbeat"])
     if "routines" in data:
-        setup["routines"] = _routine_plan(data["routines"])
+        setup["routines"] = _routine_plan(data["routines"], delegated=delegated)
         planned_heartbeat = next((routine for routine in setup["routines"] if routine["id"] == "heartbeat"), {})
         if "heartbeat" in setup and setup["heartbeat"] != planned_heartbeat.get("schedule"):
             raise ValueError("Setup heartbeat must agree with the scheduled heartbeat in routines")
+
+    if delegated and not any(routine["mode"] != "manual" for routine in setup.get("routines", [])):
+        raise ValueError("A delegated heartbeat needs scheduled or event-driven work")
 
     def lines(field):
         values = data.get(field, [])
@@ -208,7 +223,8 @@ def _create(root, identifier, name, mission, parent, *, setup=None, bootstrap=Fa
         "completion_authorization": None,
         "memory": {"private": "memory/", "shared": "reviewed references only"},
         "approved_sources": [], "capabilities": ["read approved local evidence", "write project reports"],
-        "max_delegation_depth": int(identifier == CHIEF),
+        "max_delegation_depth": int(identifier == CHIEF or (setup is not None and
+                                    "delegated_heartbeat" in setup["setup"])),
         "escalation": ["access denied", "verified regression", "decision required"],
         "routines": [{"id": key, "proposed_cadence": cadence, "file": f"routines/{key}.md"}
                      for key, cadence in proposed_cadence.items()],
@@ -296,7 +312,7 @@ def _onboarding(project, chief, bot, thread):
     else:
         return {"issue": f"Confirm the routine plan and record it in {evidence_file}, then resume."}
     try:
-        plan = _routine_plan(plan)
+        plan = _routine_plan(plan, delegated="delegated_heartbeat" in setup)
     except ValueError as exc:
         return {"issue": f"Correct the saved routine plan ({exc}), then resume."}
 
@@ -335,7 +351,16 @@ def _onboarding(project, chief, bot, thread):
         routine["revision"] = digest.hexdigest()
         review = reviews.get(identifier)
         routine["review"] = review if isinstance(review, dict) and review.get("revision") == routine["revision"] else {}
-    return {"routines": plan, "evidence_file": evidence_file}
+    result = {"routines": plan, "evidence_file": evidence_file}
+    if "delegated_heartbeat" in setup:
+        try:
+            config = scheduled.plan(project, bot)
+        except ValueError as exc:
+            return {"issue": str(exc)}
+        result["dispatcher"] = {key: config[key] for key in ("minutes", "window", "timezone", "revision")}
+        review = reviews.get("dispatcher")
+        result["dispatcher"]["review"] = review if isinstance(review, dict) else {}
+    return result
 
 
 def provision(db, args, root, chief):

@@ -12,6 +12,7 @@ import dispatch
 import fleet
 import ledger
 import monitor
+import scheduled
 
 ROOT = Path(__file__).resolve().parent
 
@@ -49,7 +50,7 @@ def main(argv=None, root=ROOT):
     sub.add_parser("status", help="Check this project's durable state")
     sub.add_parser("briefing", help="Read recent evidence and open work").add_argument(
         "--period", choices=("day", "week"), default="day")
-    for module in (fleet, ledger, monitor, dispatch):
+    for module in (fleet, ledger, monitor, dispatch, scheduled):
         module.commands(sub)
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -63,12 +64,14 @@ def main(argv=None, root=ROOT):
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
         db.execute("BEGIN IMMEDIATE")
-        for module in (ledger, monitor, dispatch):
+        for module in (ledger, monitor, dispatch, scheduled):
             module.install(db)
         if args.command == "status":
             return {"bot": bot.name, "database": str(folder / "agent.sqlite3"),
                     "integrity": db.execute("PRAGMA quick_check").fetchone()[0],
                     "sources": db.execute("SELECT count(*) FROM monitor_sources").fetchone()[0]}
+        if args.command in {"schedule", "state"}:
+            return scheduled.run(db, args, bot)
         if args.command == "dispatch":
             return dispatch.run(db, args, root, bot)
         if args.command == "provision-bot":
@@ -76,6 +79,9 @@ def main(argv=None, root=ROOT):
         if args.command == "briefing":
             return briefing(db, args.period)
         if args.command == "heartbeat":
+            manifest = fleet._record(bot)
+            if not args.operations and (manifest.get("setup") or {}).get("delegated_heartbeat"):
+                return scheduled.wakeup(db, bot, manifest)
             findings = monitor.run(db, args, root, bot)
             reminders = ledger.due(db)
             messages = fleet.deliveries(db, root, bot)

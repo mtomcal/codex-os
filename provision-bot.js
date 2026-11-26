@@ -3,10 +3,11 @@
     if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id) || id.length > 64)
         throw Error("Select a valid specialist bot ID");
 
-    async function cli(flag, chatId) {
+    async function cli(flag, chatId, readSchedule = false) {
         if (chatId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(chatId))
             throw Error("Invalid native chat ID");
-        const cmd = ["python3 ../../codexos.py provision-bot", id, flag, chatId].filter(Boolean).join(" ");
+        const cmd = readSchedule ? "python3 ../../codexos.py --bot " + id + " schedule status" :
+            ["python3 ../../codexos.py provision-bot", id, flag, chatId].filter(Boolean).join(" ");
         const approval = flag === "--activate" && approveManifestWrite ? {
             sandbox_permissions: "require_escalated",
             justification: "May I save the verified main chat and active status in this specialist's local bot manifest?",
@@ -161,6 +162,46 @@
                         {...details, automationId: saved.id});
             } catch {
                 return status("routine_history_pending", "Restore access to the native routine history, then resume.", details);
+            }
+        }
+        if (plan.dispatcher) {
+            const {minutes, window, timezone, revision, review} = plan.dispatcher;
+            const schedule = {minutes, window, timezone};
+            const marker = "CodexOS heartbeat verified: " + id + " " + revision;
+            const scheduledPrompt = [
+                "CodexOS delegated heartbeat for " + id + " (" + revision + ").",
+                "Run the checked-in ../../heartbeat.js once in desktop code mode with tools, the bot's absolute project path, and {automationId: ID} from this native wakeup's automation_id.",
+                "The dispatcher handles due work. Report any actionable dispatch problem and otherwise end quietly.",
+                "If the dispatcher returns first_tick: true, record this exact line: " + marker,
+            ].join("\n");
+            const details = {...main, revision, schedule, scheduledPrompt, projectId, evidenceFile: plan.evidence_file};
+            const saved = review.schedule;
+            if (review.revision !== revision || !reference(saved?.approval))
+                return status("schedule_approval_pending", "Record the separate authorization for this bot’s one heartbeat.", details);
+            if (!reference(saved.id) || !reference(saved.review) || saved.status !== "ACTIVE" ||
+                saved.target_chat !== chatId || saved.prompt !== scheduledPrompt ||
+                saved.minutes !== minutes || saved.timezone !== timezone ||
+                saved.window?.start !== window.start || saved.window?.end !== window.end ||
+                JSON.stringify(saved.window?.days) !== JSON.stringify(window.days))
+                return status("schedule_verification_pending", "Verify the single authorized native heartbeat and record its settings.", details);
+            const binding = await cli(undefined, undefined, true).catch(() => ({}));
+            if (binding.automation !== saved.id || binding.plan !== revision || binding.chat !== chatId ||
+                binding.project !== projectId)
+                return status("schedule_binding_pending", "Record the verified heartbeat with the fleet CLI.", {...details, automationId: saved.id});
+            try {
+                const turn = reference(saved.first_turn) && await findTurn(saved.first_turn);
+                const input = turn?.items?.[0]?.output?.text;
+                const envelope = input?.match(/^<heartbeat>\n  <automation_id>([^<]+)<\/automation_id>\n  <current_time_iso>[^<]+<\/current_time_iso>\n  <instructions>\n([\s\S]*)\n  <\/instructions>\n<\/heartbeat>\n?$/);
+                const answer = turn?.items?.findLast(item => item.type === "agentMessage" && item.phase === "final_answer");
+                if (!Number.isFinite(binding.first_tick) || !reference(saved.first_review) ||
+                    !successfulRun(turn, scheduledPrompt, marker, true) ||
+                    envelope?.[1] !== saved.id || envelope?.[2] !== scheduledPrompt ||
+                    !Number.isFinite(turn.startedAt) || !Number.isFinite(turn.completedAt) ||
+                    Math.floor(binding.first_tick) < turn.startedAt || Math.floor(binding.first_tick) > turn.completedAt ||
+                    answer?.text?.trimEnd().split("\n").at(-1) !== marker)
+                    return status("first_run_pending", "Verify the first native run and its ledger tick, then record the turn.", details);
+            } catch {
+                return status("routine_history_pending", "Restore access to the native heartbeat history, then resume.", details);
             }
         }
         return status("ready", null, {...main, setupReady: true});
