@@ -57,6 +57,7 @@ def prepare(parent):
         target.mkdir()
         for module in ROOT.glob("*.py"):
             shutil.copy2(module, target / module.name)
+        shutil.copy2(ROOT / "heartbeat.js", target / "heartbeat.js")
         shutil.copytree(ROOT / "templates", target / "templates")
         (target / "docs").mkdir()
         shutil.copy2(ROOT / "docs/dispatch.md", target / "docs/dispatch.md")

@@ -1,5 +1,7 @@
 """Exercise the archive condition in both worker graders using synthetic receipts."""
 import json
+import shutil
+import subprocess
 from pathlib import Path
 import unittest
 
@@ -8,6 +10,10 @@ import grade_notification
 
 
 class WorkerArchiveTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is required to replay the desktop JavaScript adapter")
+    def test_heartbeat_recovers_lost_archive_receipt(self):
+        subprocess.run(["node", str(Path(__file__).with_name("check_heartbeat.js"))], check=True)
+
     def test_dispatch_requires_archived_worker(self):
         fixture = Path(__file__).parent / "fixtures/dispatch.json"
         evidence = json.loads(fixture.read_text())

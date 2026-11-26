@@ -1,7 +1,9 @@
 """Record an authorized native worker's lifecycle in the coordinator's private database."""
 import argparse
 from datetime import datetime, timezone
+import json
 import re
+from uuid import UUID
 
 
 def install(db):
@@ -12,12 +14,15 @@ def install(db):
         host TEXT, worker TEXT, report TEXT, decision TEXT, review TEXT, cleanup TEXT,
         updated TEXT NOT NULL, UNIQUE(host,worker))""")
 
+    if "delivery" not in {row[1] for row in db.execute("PRAGMA table_info(dispatches)")}:
+        db.execute("ALTER TABLE dispatches ADD COLUMN delivery TEXT")
+
     db.execute("""CREATE TABLE IF NOT EXISTS dispatch_poll (
         key TEXT PRIMARY KEY REFERENCES dispatches(key), turn INTEGER NOT NULL)""")
 
 
 def pending(db):
-    rows = [dict(row) for row in db.execute("""SELECT d.key,d.state,d.host,d.worker
+    rows = [dict(row) for row in db.execute("""SELECT d.key,d.state,d.host,d.worker,d.delivery
         FROM dispatches d LEFT JOIN dispatch_poll p USING(key)
         WHERE d.state!='cleaned' ORDER BY COALESCE(p.turn,0),d.updated,d.key LIMIT 3""")]
     if rows:
@@ -26,6 +31,24 @@ def pending(db):
             ON CONFLICT(key) DO UPDATE SET turn=excluded.turn""",
             [(row["key"], turn) for row in rows])
     return rows
+
+
+def cleanup_candidates(root, workers):
+    ready = [row for row in workers if row["delivery"] and row["host"] == "local" and row["worker"]
+             and row["state"] in {"accepted", "rejected", "abandoned"}]
+    if not ready:
+        return []
+    protected = {json.loads(path.read_text()).get("primary_thread")
+                 for path in (root / "bots").glob("*/bot.json")}
+    result = []
+    for row in ready:
+        try:
+            worker = str(UUID(row["worker"]))
+        except ValueError:
+            continue
+        if worker == row["worker"] and worker not in protected:
+            result.append({"key": row["key"], "worker": worker, "host": row["host"]})
+    return result
 
 
 def short_text(raw):
@@ -45,7 +68,7 @@ def commands(sub):
     actions = sub.add_parser("dispatch", help="Coordinate native worker chats").add_subparsers(
         dest="dispatch_action", required=True)
     actions.add_parser("list", help="Show up to 50 jobs, active work first")
-    for name in ("reserve", "bind", "report", "review", "abandon", "cleaned", "show"):
+    for name in ("reserve", "bind", "report", "review", "abandon", "delivered", "cleaned", "show"):
         action = actions.add_parser(name)
         action.add_argument("key", type=key_text)
         if name == "reserve":
@@ -56,7 +79,7 @@ def commands(sub):
             action.add_argument("--host", type=short_text, default="local")
         if name == "review":
             action.add_argument("--decision", choices=("accept", "reject"), required=True)
-        if name in {"report", "review", "abandon", "cleaned"}:
+        if name in {"report", "review", "abandon", "delivered", "cleaned"}:
             action.add_argument("--evidence", required=True, type=short_text)
 
 
@@ -97,6 +120,12 @@ def run(db, args, root, bot):
         state = "abandoned"
         changes = {"decision": state, "review": args.evidence}
         required = ("reserved", "running")
+    elif action == "delivered":
+        state = record["state"]
+        changes = {"delivery": args.evidence}
+        required = ("accepted", "rejected", "abandoned")
+        if record["delivery"] and record["delivery"] != args.evidence:
+            raise ValueError("Delivery is already recorded")
     elif action == "cleaned":
         state = "cleaned"
         changes = {"cleanup": args.evidence}

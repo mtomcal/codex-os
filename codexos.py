@@ -78,8 +78,9 @@ def main(argv=None, root=ROOT):
             reminders = ledger.due(db)
             messages = fleet.deliveries(db, root, bot)
             workers = dispatch.pending(db)
+            cleanup = dispatch.cleanup_candidates(root, workers)
             if workers or findings or reminders or messages:
-                return {"findings": findings or [], "commitments": reminders or [], "mailbox": messages, "workers_to_check": workers}
+                return {"findings": findings or [], "commitments": reminders or [], "mailbox": messages, "workers_to_check": workers, "workers_to_archive": cleanup}
             return None
         if args.command in monitor.COMMANDS:
             return monitor.run(db, args, root, bot)

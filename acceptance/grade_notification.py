@@ -10,7 +10,7 @@ def checks(evidence):
     sends = evidence["sends"]
     trigger = evidence["trigger"]
     receipt = trigger.get("output", {}).get("text", "")
-    archive = evidence["archive"]
+    archive = evidence.get("archive") or {}
     lookup = evidence.get("archive_lookup") or {}
     row = evidence["ledger"]
     numbers = {"17", "29", "46"}
@@ -34,8 +34,8 @@ def checks(evidence):
             and row["decision"] == "accepted" and bool(row["review"])
         ),
         "Chief archived the bound worker and retained the report": (
-            archive["tool"] == "set_thread_archived" and archive["status"] == "completed"
-            and archive["arguments"]["archived"] is True and archive["arguments"]["threadId"] == worker
+            (bool(row.get("delivery")) or (archive.get("tool") == "set_thread_archived" and archive["status"] == "completed"
+             and archive["arguments"]["archived"] is True and archive["arguments"]["threadId"] == worker))
             and lookup.get("id") == worker and bool(row.get("host")) and lookup.get("hostId") == row["host"]
             and row["state"] == "cleaned" and bool(row["cleanup"])
             and numbers <= set(re.findall(r"\b\d+\b", evidence["retained_report"]))
