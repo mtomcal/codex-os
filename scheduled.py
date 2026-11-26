@@ -71,7 +71,9 @@ def install(db):
         """CREATE TABLE IF NOT EXISTS schedule_binding (
             slot INTEGER PRIMARY KEY CHECK(slot=1), plan TEXT NOT NULL, chat TEXT NOT NULL,
             automation TEXT NOT NULL, project TEXT NOT NULL, approved_at REAL NOT NULL,
-            approval TEXT NOT NULL, first_tick REAL, first_usable_tick REAL)""",
+            approval TEXT NOT NULL, first_tick REAL, first_usable_tick REAL,
+            generation TEXT NOT NULL, verified_turn TEXT)""",
+        """CREATE TABLE IF NOT EXISTS schedule_tick_candidates (completed_at REAL PRIMARY KEY)""",
         """CREATE TABLE IF NOT EXISTS schedule_occurrences (
             id TEXT PRIMARY KEY, plan TEXT NOT NULL, routine TEXT NOT NULL, due REAL NOT NULL,
             event TEXT, evidence TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
@@ -87,17 +89,30 @@ def install(db):
             id TEXT NOT NULL REFERENCES schedule_occurrences(id), attempt INTEGER NOT NULL,
             token TEXT NOT NULL, project TEXT NOT NULL, chat TEXT NOT NULL, host TEXT NOT NULL,
             worker TEXT UNIQUE, client TEXT UNIQUE, turn TEXT, terminal TEXT,
-            outcome TEXT, reviewed TEXT, delivered TEXT, archived REAL, checked REAL,
+            outcome TEXT, reviewed TEXT, delivered TEXT, archived REAL, checked REAL, launch_requested REAL,
             PRIMARY KEY(id,attempt))""",
     ):
         db.execute(ddl)
-    if "first_usable_tick" not in {row["name"] for row in db.execute("PRAGMA table_info(schedule_binding)")}:
+    binding_columns = {row["name"] for row in db.execute("PRAGMA table_info(schedule_binding)")}
+    if "first_usable_tick" not in binding_columns:
         db.execute("ALTER TABLE schedule_binding ADD COLUMN first_usable_tick REAL")
         # The previous schema retained only the current claim. Import the identity it still has.
         db.execute("""INSERT INTO schedule_attempts (id,attempt,token,project,chat,host,worker,outcome)
             SELECT o.id,o.attempt,o.token,b.project,b.chat,'local',o.worker,o.receipt
             FROM schedule_occurrences o CROSS JOIN schedule_binding b
             WHERE o.token IS NOT NULL""")
+    if "generation" not in binding_columns:
+        db.execute("ALTER TABLE schedule_binding ADD COLUMN generation TEXT")
+        db.execute("ALTER TABLE schedule_binding ADD COLUMN verified_turn TEXT")
+        db.execute("UPDATE schedule_binding SET generation=lower(hex(randomblob(16)))")
+    attempt_columns = {row["name"] for row in db.execute("PRAGMA table_info(schedule_attempts)")}
+    if "launch_requested" not in attempt_columns:
+        db.execute("ALTER TABLE schedule_attempts ADD COLUMN launch_requested REAL")
+    if "launch_requested" not in attempt_columns or "first_usable_tick" not in binding_columns:
+        # A legacy claim may already have reached the native service.
+        db.execute("""UPDATE schedule_attempts SET launch_requested=(
+            SELECT changed FROM schedule_occurrences WHERE id=schedule_attempts.id)
+            WHERE launch_requested IS NULL""")
     db.execute("""CREATE TRIGGER IF NOT EXISTS revision_schedule_first_usable_tick
         AFTER UPDATE OF first_usable_tick ON schedule_binding
         WHEN new.first_usable_tick IS NOT NULL AND old.first_usable_tick IS NULL
@@ -170,8 +185,14 @@ def commands(sub):
         tick.add_argument("--automation", type=ledger.identifier, required=True)
         if action == "complete-tick":
             tick.add_argument("--plan", required=True)
-    for action in ("bind-worker", "queued", "launch-overdue", "terminal", "start", "finish", "review",
-                   "review-attempt", "delivered-attempt", "archived-attempt"):
+            tick.add_argument("--generation", required=True)
+    confirm = ops.add_parser("confirm-tick", help="Record the native turn verified by onboarding")
+    confirm.add_argument("--generation", required=True)
+    confirm.add_argument("--turn", type=ledger.identifier, required=True)
+    confirm.add_argument("--started", type=int, required=True)
+    confirm.add_argument("--completed", type=int, required=True)
+    for action in ("request-worker", "bind-worker", "queued", "launch-overdue", "terminal",
+                   "start", "finish", "review", "review-attempt", "delivered-attempt", "archived-attempt"):
         step = ops.add_parser(action)
         step.add_argument("id")
         if action in ("bind-worker", "terminal", "review-attempt", "delivered-attempt", "archived-attempt"):
@@ -183,7 +204,7 @@ def commands(sub):
         if action == "terminal":
             step.add_argument("turn", type=ledger.identifier)
             step.add_argument("status", choices=("completed", "failed", "interrupted"))
-        if action in ("bind-worker", "queued", "launch-overdue", "start", "finish"):
+        if action in ("request-worker", "bind-worker", "queued", "launch-overdue", "start", "finish"):
             step.add_argument("token")
         if action in ("finish", "review", "review-attempt", "delivered-attempt"):
             step.add_argument("--evidence", type=ledger.prose, required=True)
@@ -244,7 +265,7 @@ def primary_state(db, args, manifest):
 
 
 def attempt_history(db, occurrence):
-    fields = "id,attempt,worker,client,host,project,turn,terminal,outcome,reviewed,delivered,archived"
+    fields = "id,attempt,worker,client,host,project,turn,terminal,outcome,reviewed,delivered,archived,launch_requested"
     if occurrence is not None:
         if not ID.fullmatch(occurrence):
             raise ValueError("Invalid occurrence ID")
@@ -304,8 +325,10 @@ def carry_events(db, config, now):
     for routine in config["routines"]:
         if routine["mode"] == "event":
             db.execute("""UPDATE schedule_occurrences SET plan=?,state='ready',changed=?
-                WHERE plan<>? AND routine=? AND event IS NOT NULL AND attempt=0
-                AND state IN ('ready','expired')""", (config["revision"], now, config["revision"], routine["id"]))
+                WHERE plan<>? AND routine=? AND event IS NOT NULL AND state IN ('ready','expired')
+                AND NOT EXISTS (SELECT 1 FROM schedule_attempts a
+                    WHERE a.id=schedule_occurrences.id AND a.launch_requested IS NOT NULL)""",
+                (config["revision"], now, config["revision"], routine["id"]))
 
 
 def tick(db, config, binding, now):
@@ -327,9 +350,10 @@ def tick(db, config, binding, now):
                 if enqueue(db, revision, routine["id"], due, now)[1]:
                     ready += 1
     recover = [dict(row) for row in db.execute("""SELECT a.id,a.attempt,a.token,a.client,a.chat,a.project,a.host,
-        o.routine,o.state='launching' AND o.changed<? AS overdue
+        o.routine,o.state='launching' AND a.launch_requested<? AS overdue
         FROM schedule_attempts a JOIN schedule_occurrences o USING(id)
-        WHERE a.worker IS NULL AND a.attempt=o.attempt AND o.state IN ('launching','started','review','done','cancelled')
+        WHERE a.worker IS NULL AND a.launch_requested IS NOT NULL AND a.attempt=o.attempt
+        AND o.state IN ('launching','started','review','done','cancelled')
         ORDER BY a.checked,a.id LIMIT 10""", (now - 3600,))]
     workers = [dict(row) for row in db.execute("""SELECT id,attempt,worker,host FROM schedule_attempts
         WHERE worker IS NOT NULL AND terminal IS NULL ORDER BY checked,id,attempt LIMIT 10""")]
@@ -345,7 +369,7 @@ def tick(db, config, binding, now):
         busy = db.execute("""SELECT count(*) FROM schedule_occurrences
             WHERE state IN ('launching','started')""").fetchone()[0]
         routines = {routine["id"]: routine for routine in config["routines"]}
-        for row in db.execute("""SELECT id,routine FROM (
+        for row in db.execute("""SELECT id FROM (
             SELECT id,routine,due,row_number() OVER (PARTITION BY routine ORDER BY due,id) AS position
             FROM schedule_occurrences AS ready WHERE plan=? AND state='ready' AND due<=?
             AND NOT EXISTS (SELECT 1 FROM schedule_occurrences AS other WHERE other.routine=ready.routine
@@ -354,12 +378,16 @@ def tick(db, config, binding, now):
             token = secrets.token_hex(16)
             db.execute("""UPDATE schedule_occurrences SET token=?,state='launching',
                        attempt=attempt+1,changed=? WHERE id=?""", (token, now, row["id"]))
-            attempt = db.execute("""INSERT INTO schedule_attempts (id,attempt,token,project,chat,host)
-                SELECT id,attempt,token,?,?,'local' FROM schedule_occurrences WHERE id=? RETURNING attempt""",
-                (binding["project"], binding["chat"], row["id"])).fetchone()["attempt"]
-            work.append(dict(row, attempt=attempt, token=token, file=routines[row["routine"]]["file"]))
+            db.execute("""INSERT INTO schedule_attempts (id,attempt,token,project,chat,host)
+                SELECT id,attempt,token,?,?,'local' FROM schedule_occurrences WHERE id=?""",
+                (binding["project"], binding["chat"], row["id"]))
+        unattempted = db.execute("""SELECT o.id,o.routine,a.attempt,a.token
+            FROM schedule_attempts a JOIN schedule_occurrences o USING(id)
+            WHERE o.plan=? AND a.chat=? AND o.state='launching' AND a.attempt=o.attempt
+                AND a.launch_requested IS NULL ORDER BY o.due,o.id LIMIT ?""", (revision, binding["chat"], LIMIT))
+        work = [dict(job, file=routines[job["routine"]]["file"]) for job in unattempted]
     return {"work": work, "workers": workers, "recover": recover, "archives": archives, "plan": revision,
-            "needs_first_tick": binding["first_usable_tick"] is None}
+            "generation": binding["generation"], "needs_first_tick": binding["verified_turn"] is None}
 
 
 def attempt_record(db, args, row, old_plan, now):
@@ -419,28 +447,38 @@ def change_occurrence(db, args, config, now):
     if hasattr(args, "token") and (not ID.fullmatch(args.token) or args.token != row["token"]):
         raise ValueError("Occurrence claim changed")
     state, worker, receipt = row["state"], row["worker"], row["receipt"]
+    if action == "request-worker":
+        requested = db.execute("""UPDATE schedule_attempts SET launch_requested=?
+            WHERE id=? AND attempt=? AND launch_requested IS NULL AND ?='launching'""",
+            (now, args.id, row["attempt"], state))
+        return {"launch": bool(requested.rowcount)}
     if action in {"bind-worker", "queued"} and state in {"launching", "started", "done", "review", "cancelled"}:
         attempt = db.execute("SELECT * FROM schedule_attempts WHERE id=? AND attempt=?",
                              (args.id, row["attempt"])).fetchone()
         if action == "queued":
             if attempt["client"] not in (None, args.client):
                 raise ValueError("Native launch reference changed")
-            db.execute("UPDATE schedule_attempts SET client=? WHERE id=? AND attempt=?",
-                       (args.client, args.id, row["attempt"]))
+            db.execute("UPDATE schedule_attempts SET client=?,launch_requested=coalesce(launch_requested,?) "
+                       "WHERE id=? AND attempt=?", (args.client, now, args.id, row["attempt"]))
         else:
             if worker not in (None, args.worker) or args.worker == attempt["chat"]:
                 raise ValueError("Native worker identity changed")
-            db.execute("UPDATE schedule_attempts SET worker=? WHERE id=? AND attempt=?",
-                       (args.worker, args.id, row["attempt"]))
+            db.execute("UPDATE schedule_attempts SET worker=?,launch_requested=coalesce(launch_requested,?) "
+                       "WHERE id=? AND attempt=?", (args.worker, now, args.id, row["attempt"]))
             if worker != args.worker:
                 save_occurrence(db, row, now, state, receipt, worker=args.worker)
         return {"state": state}
-    if action == "launch-overdue" and state == "launching" and worker is None and row["changed"] < now - 3600:
-        save_occurrence(db, row, now, "review", "Native launch outcome unconfirmed", worker=None)
-        return {"state": "review"}
+    if action == "launch-overdue" and state == "launching" and worker is None:
+        overdue = db.execute("""SELECT 1 FROM schedule_attempts
+            WHERE id=? AND attempt=? AND launch_requested<?""", (args.id, row["attempt"], now - 3600)).fetchone()
+        if overdue:
+            save_occurrence(db, row, now, "review", "Native launch outcome unconfirmed", worker=None)
+            return {"state": "review"}
     if action == "start":
         if state != "launching":
             return {"start": False}
+        db.execute("""UPDATE schedule_attempts SET launch_requested=coalesce(launch_requested,?)
+            WHERE id=? AND attempt=?""", (now, args.id, row["attempt"]))
         save_occurrence(db, row, now, "started", receipt, worker=worker)
         return {"start": True, "scope": config["scope"], "routine": row["routine"], "event": row["event"],
                 "evidence": row["evidence"]}
@@ -480,33 +518,64 @@ def run(db, args, bot):
         return attempt_history(db, args.id)
     if action == "status":
         if binding and (binding["plan"], binding["chat"]) == (config["revision"], chat):
-            return {key: binding[key] for key in ("automation", "project", "chat", "plan", "first_tick", "first_usable_tick")}
+            return {key: binding[key] for key in ("automation", "project", "chat", "plan",
+                                                   "first_tick", "first_usable_tick", "generation", "verified_turn")}
         return {}
     if action == "bind":
         if not THREAD.fullmatch(args.chat) or args.chat != chat or args.plan != config["revision"]:
             raise ValueError("Schedule approval must match the active primary chat and plan revision")
         if binding and (binding["automation"], binding["project"]) != (args.automation, args.project):
             raise ValueError("A different native schedule or project is already bound")
-        db.execute("""INSERT INTO schedule_binding VALUES (1,?,?,?,?,?,?,NULL,NULL)
+        saved = db.execute("""INSERT INTO schedule_binding
+            (slot,plan,chat,automation,project,approved_at,approval,generation) VALUES (1,?,?,?,?,?,?,?)
             ON CONFLICT(slot) DO UPDATE SET plan=excluded.plan,chat=excluded.chat,
-            approved_at=excluded.approved_at,approval=excluded.approval,first_tick=NULL,first_usable_tick=NULL
+            approved_at=excluded.approved_at,approval=excluded.approval,generation=excluded.generation,
+            first_tick=NULL,first_usable_tick=NULL,verified_turn=NULL
             WHERE plan IS NOT excluded.plan OR chat IS NOT excluded.chat""",
-            (args.plan, chat, ledger.prose(args.automation), ledger.prose(args.project), now, ledger.prose(args.approval)))
+            (args.plan, chat, ledger.prose(args.automation), ledger.prose(args.project), now,
+             ledger.prose(args.approval), secrets.token_hex(16)))
+        if saved.rowcount:
+            db.execute("DELETE FROM schedule_tick_candidates")
+            db.execute("""UPDATE schedule_occurrences SET state='ready',token=NULL,changed=?
+                WHERE state='launching' AND EXISTS (SELECT 1 FROM schedule_attempts a
+                    WHERE a.id=schedule_occurrences.id AND a.attempt=schedule_occurrences.attempt
+                    AND a.launch_requested IS NULL AND (schedule_occurrences.plan<>? OR a.chat<>?))""",
+                (now, args.plan, chat))
         return {"automation": args.automation, "plan": args.plan}
     if binding is None or (binding["plan"], binding["chat"]) != (config["revision"], chat):
         if action == "tick":
             return None
         raise ValueError("Approve and verify the native heartbeat for this plan first")
+    if action == "confirm-tick":
+        if args.generation != binding["generation"] or args.started > args.completed:
+            return {"verified": False}
+        if binding["verified_turn"] is not None:
+            return {"verified": args.turn == binding["verified_turn"]}
+        # Native history reports whole seconds. Retain every candidate until one turn is verified.
+        start, end = args.started, args.completed + 1
+        candidate = db.execute("""SELECT 1 FROM schedule_tick_candidates
+            WHERE completed_at>=? AND completed_at<? LIMIT 1""", (start, end)).fetchone()
+        if not candidate and not any(
+            tick is not None and start <= tick < end
+            for tick in (binding["first_tick"], binding["first_usable_tick"])
+        ):
+            return {"verified": False}
+        db.execute("UPDATE schedule_binding SET verified_turn=? WHERE slot=1", (args.turn,))
+        db.execute("DELETE FROM schedule_tick_candidates")
+        return {"verified": True}
     if action in {"tick", "complete-tick"}:
         if (args.project, args.chat, args.automation) != (binding["project"], chat, binding["automation"]):
             raise ValueError("Native schedule, project or primary chat does not match the approved binding")
         if action == "tick":
             return tick(db, config, binding, now)
-        if args.plan != binding["plan"]:
-            raise ValueError("The heartbeat plan changed during this tick")
-        saved = db.execute("""UPDATE schedule_binding SET first_usable_tick=?
+        if (args.plan, args.generation) != (binding["plan"], binding["generation"]):
+            raise ValueError("The heartbeat binding changed during this tick")
+        if binding["verified_turn"] is not None:
+            return {"first_tick": False}
+        db.execute("INSERT OR IGNORE INTO schedule_tick_candidates VALUES (?)", (now,))
+        db.execute("""UPDATE schedule_binding SET first_usable_tick=?
             WHERE slot=1 AND first_usable_tick IS NULL""", (now,))
-        return {"first_tick": bool(saved.rowcount)}
+        return {"first_tick": True}
     if action == "ready":
         if not any(routine["id"] == args.routine and routine["mode"] == "event" for routine in config["routines"]):
             raise ValueError("Event is outside the approved routine plan")
@@ -515,7 +584,7 @@ def run(db, args, bot):
         return {"id": occurrence}
     if action == "bind-worker" and args.worker == chat:
         raise ValueError("The primary chat cannot own an occurrence")
-    if action == "start" and db.execute(
+    if action in {"request-worker", "start"} and db.execute(
         "SELECT 1 FROM schedule_attempts WHERE id=? AND token=? AND chat<>?", (args.id, args.token, chat)
     ).fetchone():
         raise ValueError("Occurrence claim belongs to a previous primary chat")

@@ -3,10 +3,10 @@
     if (typeof id !== "string" || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(id) || id.length > 64)
         throw Error("Select a valid specialist bot ID");
 
-    async function cli(flag, chatId, readSchedule = false) {
+    async function cli(flag, chatId, scheduleArgs) {
         if (chatId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(chatId))
             throw Error("Invalid native chat ID");
-        const cmd = readSchedule ? "python3 ../../codexos.py --bot " + id + " schedule status" :
+        const cmd = scheduleArgs ? ["python3 ../../codexos.py --bot", id, "schedule", ...scheduleArgs].join(" ") :
             ["python3 ../../codexos.py provision-bot", id, flag, chatId].filter(Boolean).join(" ");
         const approval = flag === "--activate" && approveManifestWrite ? {
             sandbox_permissions: "require_escalated",
@@ -184,22 +184,24 @@
                 saved.window?.start !== window.start || saved.window?.end !== window.end ||
                 JSON.stringify(saved.window?.days) !== JSON.stringify(window.days))
                 return status("schedule_verification_pending", "Verify the single authorized native heartbeat and record its settings.", details);
-            const binding = await cli(undefined, undefined, true).catch(() => ({}));
+            const binding = await cli(undefined, undefined, ["status"]).catch(() => ({}));
             if (binding.automation !== saved.id || binding.plan !== revision || binding.chat !== chatId ||
-                binding.project !== projectId)
+                binding.project !== projectId || !/^[a-f0-9]{32}$/.test(binding.generation))
                 return status("schedule_binding_pending", "Record the verified heartbeat with the fleet CLI.", {...details, automationId: saved.id});
             try {
-                const turn = reference(saved.first_turn) && await findTurn(saved.first_turn);
+                const turn = typeof saved.first_turn === "string" && /^[a-z0-9][a-z0-9._-]{0,79}$/.test(saved.first_turn)
+                    && await findTurn(saved.first_turn);
                 const input = turn?.items?.[0]?.output?.text;
                 const envelope = input?.match(/^<heartbeat>\n  <automation_id>([^<]+)<\/automation_id>\n  <current_time_iso>[^<]+<\/current_time_iso>\n  <instructions>\n([\s\S]*)\n  <\/instructions>\n<\/heartbeat>\n?$/);
                 const answer = turn?.items?.findLast(item => item.type === "agentMessage" && item.phase === "final_answer");
-                const witnessedTick = [binding.first_usable_tick, binding.first_tick].some(tick =>
-                    Number.isFinite(tick) && Math.floor(tick) >= turn?.startedAt && Math.floor(tick) <= turn?.completedAt);
-                if (!witnessedTick || !reference(saved.first_review) ||
-                    !successfulRun(turn, scheduledPrompt, marker, true) ||
-                    envelope?.[1] !== saved.id || envelope?.[2] !== scheduledPrompt ||
-                    !Number.isFinite(turn.startedAt) || !Number.isFinite(turn.completedAt) ||
-                    answer?.text?.trimEnd().split("\n").at(-1) !== marker)
+                const matches = reference(saved.first_review) && successfulRun(turn, scheduledPrompt, marker, true) &&
+                    envelope?.[1] === saved.id && envelope?.[2] === scheduledPrompt &&
+                    Number.isSafeInteger(turn.startedAt) && Number.isSafeInteger(turn.completedAt) &&
+                    answer?.text?.trimEnd().split("\n").at(-1) === marker;
+                const proof = matches && await cli(undefined, undefined, ["confirm-tick",
+                    "--generation", binding.generation, "--turn", turn.id,
+                    "--started", turn.startedAt, "--completed", turn.completedAt]);
+                if (!proof?.verified)
                     return status("first_run_pending", "Verify the first native run and its ledger tick, then record the turn.", details);
             } catch {
                 return status("routine_history_pending", "Restore access to the native heartbeat history, then resume.", details);

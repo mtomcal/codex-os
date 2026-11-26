@@ -303,8 +303,23 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.equal((await dispatcher.run()).status, "first_run_pending");
     nativeTick.startedAt = clock - 1;
     nativeTick.completedAt = clock + 1;
+    nativeTick.status = "interrupted";
+    assert.equal((await dispatcher.run()).status, "first_run_pending");
+
+    advance("2026-11-27T23:52:00Z");
+    const laterTick = {...nativeTick, id: "dispatcher-later-run", status: "completed",
+        startedAt: clock - 1, completedAt: clock + 1};
+    Object.assign(saved, {first_turn: laterTick.id});
+    saveDispatcher(proposal);
+    dispatcher.plan.routineTurns.push(laterTick);
+    assert.equal((await dispatcher.run()).status, "first_run_pending");
+    assert.deepEqual(await pulse(), {first_tick: true});
+    advance("2026-11-27T23:54:00Z");
+    assert.deepEqual(await pulse(), {first_tick: true});
+    bind(saved.id);
     assert.equal((await dispatcher.run()).status, "ready");
     assert.equal((await dispatcher.run()).status, "ready");
+    assert.equal(await pulse(), null);
     assert.equal(dispatcher.plan.launchCount, 1);
 
     const old = snapshot();
@@ -314,8 +329,20 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     const {id: event} = ready("source-1");
     assert.equal(ready("source-1").id, event);
     advance("2026-11-28T00:00:00Z");
+    failedCommand = "schedule bind-worker";
+    await assert.rejects(pulse, /Fixture transient CLI failure/);
+    assert.equal(launches.length, 1);
+    const first = launches[0];
+    assert.equal(runCLI("schedule", "attempts", first.occurrence)[0].worker, null);
+    const untouched = snapshot().occurrences.find(row => row.state === "launching" && row.id !== first.occurrence);
+    assert.ok(untouched);
     await Promise.all([pulse(), pulse()]);
     assert.equal(launches.length, 2);
+    assert.equal(launches[1].occurrence, untouched.id);
+    assert.equal(runCLI("schedule", "attempts", first.occurrence)[0].worker, first.worker);
+    const attempts = runCLI("schedule", "attempts", untouched.id);
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].launch_requested, clock);
     const [arrival, weekly] = [launches.find(job => job.occurrence === event),
         launches.find(job => job.occurrence !== event)];
     const start = job => runCLI("schedule", "start", job.occurrence, job.token);
@@ -465,6 +492,8 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.equal(attemptOf(interrupted, 1).terminal, "failed");
 
     const carried = ready("pending-across-approval").id;
+    const oldBinding = runCLI("schedule", "status");
+    assert.equal(oldBinding.verified_turn, laterTick.id);
     // Leave the operating window while editing and reapproving the same workload.
     advance("2026-12-01T01:05:00Z");
     const routineFile = join(projectDir, "routines/arrival.md");
@@ -473,10 +502,15 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.notEqual(planRevision, proposal.revision);
     assert.equal(await pulse(), null);
     bind(saved.id, planRevision);
+    assert.throws(() => runCLI("schedule", "complete-tick", "--automation", saved.id, "--project", projectId,
+        "--chat", chatId, "--plan", planRevision, "--generation", oldBinding.generation), /binding changed/);
     assert.equal(ready("pending-across-approval").id, carried);
     assert.equal(ready("source-1").id, event);
     assert.equal(ready("interrupted-launch").id, interrupted.occurrence);
-    await pulse();
+    assert.deepEqual(await pulse(), {first_tick: true});
+    assert.deepEqual(runCLI("schedule", "confirm-tick", "--generation", oldBinding.generation,
+        "--turn", laterTick.id, "--started", String(clock - 1), "--completed", String(clock + 1)), {verified: false});
+    assert.equal(runCLI("schedule", "status").verified_turn, null);
     assert.equal(launches.length, 5);
     assert.equal(snapshot().occurrences.find(row => row.id === carried).state, "ready");
     assert.equal(snapshot().occurrences.find(row => row.id === event).state, "done");

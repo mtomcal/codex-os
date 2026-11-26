@@ -215,6 +215,8 @@
 
         for (const job of result.work) {
             const prompt = workerPrompt(job);
+            const {launch} = await cli(["schedule request-worker", job.id, job.token].join(" "));
+            if (!launch) continue;
             let worker;
             try {
                 const [reply] = await native(tools.mcp__codex_app__create_thread, {
@@ -235,7 +237,8 @@
             }
         }
         const {first_tick: firstTick} = result.needs_first_tick
-            ? await cli("schedule complete-tick" + binding + " --plan " + result.plan) : {};
+            ? await cli("schedule complete-tick" + binding + " --plan " + result.plan +
+                " --generation " + result.generation) : {};
         if (!attention.size && !firstTick) return null;
         return {...(attention.size ? {occurrences_to_review: [...attention]} : {}),
             ...(firstTick ? {first_tick: true} : {})};
