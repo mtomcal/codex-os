@@ -19,16 +19,45 @@
         const [text] = await native(tools.mcp__codex_app__wait_threads, {targets, timeoutMs: 0});
         return JSON.parse(text);
     }
-    function terminalTurn(snapshot, {worker, host}) {
+    function boundPoll(snapshot, {worker, host}) {
         if (snapshot?.activityComplete === false ||
             snapshot?.errors?.some(error => error.threadId === worker && error.hostId === host)) return;
         const matches = snapshot?.polls?.filter(poll => poll.thread?.id === worker && poll.thread.hostId === host);
         if (matches?.length !== 1) return;
         const [poll] = matches;
-        if (poll.activityComplete === false || poll.thread.status?.type !== "idle") return;
+        if (poll.activityComplete !== false) return poll;
+    }
+    function terminalTurn(snapshot, job) {
+        const poll = boundPoll(snapshot, job);
+        if (poll?.thread.status?.type !== "idle") return;
         const turn = poll.latestTurn;
         if (turn?.id && Number.isFinite(turn.completedAt) &&
             ["completed", "failed", "interrupted"].includes(turn.status)) return turn;
+    }
+    async function activeCheckpoint(snapshot, job) {
+        const poll = boundPoll(snapshot, job);
+        if (poll?.thread.status?.type !== "active" || poll.latestTurn?.status !== "inProgress") return;
+        const {key, worker, host} = job;
+        const validId = value => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value);
+        if (![key, worker, host, poll.latestTurn.id].every(validId)) return;
+        const [text] = await native(tools.mcp__codex_app__read_thread, {
+            threadId: worker, hostId: host, turnLimit: 1, itemLimit: 20, includeOutputs: false, maxOutputCharsPerItem: 220,
+        });
+        const {thread, turns} = JSON.parse(text);
+        const [turn] = turns ?? [];
+        if (thread?.id !== worker || thread.hostId !== host || thread.status?.type !== "active" ||
+            turn?.id !== poll.latestTurn.id || turn.status !== "inProgress") return;
+        for (const item of (turn.items ?? []).slice().reverse()) {
+            if (item.type !== "agentMessage" || item.phase !== "commentary" ||
+                typeof item.text !== "string" || !validId(item.id)) continue;
+            const checkpoint = /^CodexOS checkpoint ([a-z0-9][a-z0-9-]{0,63}) ([a-z0-9][a-z0-9-]{0,63})(?: ([a-z0-9][a-z0-9-]{0,63}))?$/.exec(item.text);
+            if (checkpoint?.[1] !== key) continue;
+            const [, , value, handoff] = checkpoint;
+            const args = ["dispatch", "checkpoint", key, "--host", host, "--worker", worker,
+                "--turn", turn.id, "--item", item.id, "--value", value];
+            if (handoff) args.push("--handoff", handoff);
+            return cli(args.join(" "));
+        }
     }
     async function archived(id, hostId) {
         let cursor;
@@ -223,6 +252,13 @@
             for (const job of pendingReview) {
                 const turn = terminalTurn(snapshot, job);
                 if (turn) pulse.workers_to_review.push({...job, turn_id: turn.id, turn_status: turn.status});
+                if (!job.check_checkpoint) continue;
+                try {
+                    const observation = await activeCheckpoint(snapshot, job);
+                    if (observation) (pulse.worker_checkpoints ??= []).push(observation);
+                } catch {
+                    pulse.worker_status_pending = true;
+                }
             }
         } catch {
             pulse.worker_status_pending = true;

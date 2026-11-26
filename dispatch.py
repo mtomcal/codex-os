@@ -1,6 +1,7 @@
 """Record an authorized native worker's lifecycle in the coordinator's private database."""
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import re
 from uuid import UUID
@@ -39,6 +40,56 @@ def install(db):
     if "send_denial" not in columns:
         db.execute("ALTER TABLE dispatch_additions ADD COLUMN send_denial TEXT")
 
+    db.execute("""CREATE TABLE IF NOT EXISTS dispatch_checkpoints (
+        key TEXT PRIMARY KEY REFERENCES dispatches(key), expected TEXT NOT NULL,
+        correction TEXT NOT NULL, drift TEXT, recovery TEXT)""")
+
+
+def configure_checkpoint(db, args, record):
+    if record["state"] not in {"reserved", "running"}:
+        raise ValueError("Checkpoint monitoring requires an open dispatch")
+    db.execute("""INSERT INTO dispatch_checkpoints(key,expected,correction) VALUES(?,?,?)
+        ON CONFLICT(key) DO NOTHING""", (args.key, args.expected, args.correction))
+    plan = checkpoint(db, args.key)
+    if (plan["expected"], plan["correction"]) != (args.expected, args.correction):
+        raise ValueError("Checkpoint already configured for this dispatch")
+    return plan
+
+
+def observe_checkpoint(db, args, record, stamp):
+    plan = checkpoint(db, args.key)
+    if (plan is None or plan["recovery"] is not None or record["state"] != "running"
+            or (record["host"], record["worker"]) != (args.host, args.worker)):
+        return None
+    handoff_key = "drift-" + sha256(args.key.encode()).hexdigest()[:32]
+    evidence = f"Codex turn {args.turn}, item {args.item}"
+    if plan["drift"] is not None:
+        if args.value == plan["expected"] and args.handoff == handoff_key:
+            handoff_record = addition(db, handoff_key)
+            if (handoff_record and handoff_record["parent"] == args.key and handoff_record["handoff"] == "sent"
+                    and handoff_record["acknowledgement"]):
+                db.execute("UPDATE dispatch_checkpoints SET recovery=? WHERE key=?", (evidence, args.key))
+                return {"parent": args.key, "key": handoff_key, "status": "recovered", "evidence": evidence}
+        return None
+    if args.value == plan["expected"] or args.handoff is not None:
+        return None
+    if addition(db, handoff_key) is not None:
+        raise ValueError("Checkpoint correction key is already in use")
+    permissions = [{"id": "send-correction", "action": "Send one in-scope checkpoint correction",
+                    "target": f"Codex worker {args.worker} on {args.host}", "required": True}]
+    request = argparse.Namespace(key=handoff_key, reuse=args.key, requirement=plan["correction"],
+                                 objective=record["objective"], scope=record["scope"],
+                                 plan=json.dumps(permissions), decisions=None, required=True)
+    reserve(db, request, stamp)
+    db.execute("UPDATE dispatch_checkpoints SET drift=? WHERE key=?", (f"{evidence}: {args.value}", args.key))
+    return {"parent": args.key, "key": handoff_key, "status": "drift", "expected": plan["expected"],
+            "observed": args.value, "evidence": evidence}
+
+
+def checkpoint(db, key):
+    row = db.execute("SELECT * FROM dispatch_checkpoints WHERE key=?", (key,)).fetchone()
+    return dict(row) if row else None
+
 
 def pending_handoffs(db):
     return [dict(row) for row in db.execute("""SELECT a.key,a.parent,a.handoff,d.state,d.host,d.worker
@@ -57,6 +108,11 @@ def pending(db):
         db.executemany("""INSERT INTO dispatch_poll(key,turn) VALUES(?,?)
             ON CONFLICT(key) DO UPDATE SET turn=excluded.turn""",
             [(row["key"], turn) for row in rows])
+    for row in rows:
+        if row["state"] == "running":
+            plan = checkpoint(db, row["key"])
+            if plan and plan["recovery"] is None:
+                row["check_checkpoint"] = True
     return rows
 
 
@@ -91,15 +147,29 @@ def key_text(raw):
     return raw
 
 
+def native_id(raw):
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", raw):
+        raise argparse.ArgumentTypeError("Use a native identifier of up to 128 characters")
+    return raw
+
+
 def commands(sub):
     actions = sub.add_parser("dispatch", help="Coordinate native worker chats").add_subparsers(
         dest="dispatch_action", required=True)
     listing = actions.add_parser("list", help="Show up to 50 jobs, active work first")
     listing.add_argument("--active", action="store_true", help="Show all running jobs with bound workers")
     for name in ("reserve", "bind", "report", "review", "abandon", "delivered", "cleaned", "show",
-                 "handoff", "permissions"):
+                 "handoff", "permissions", "monitor", "checkpoint"):
         action = actions.add_parser(name)
         action.add_argument("key", type=key_text)
+        if name == "monitor":
+            action.add_argument("--expected", required=True, type=key_text)
+            action.add_argument("--correction", required=True, type=short_text)
+        if name == "checkpoint":
+            for field in ("host", "worker", "turn", "item"):
+                action.add_argument("--" + field, required=True, type=native_id)
+            action.add_argument("--value", required=True, type=key_text)
+            action.add_argument("--handoff", type=key_text)
         if name == "reserve":
             action.add_argument("--objective", required=True, type=short_text)
             action.add_argument("--scope", required=True, type=short_text)
@@ -283,7 +353,14 @@ def run(db, args, root, bot):
             return permission_plan.annotate(db, "dispatch", key, record)
         raise ValueError(f"Unknown dispatch: {key}")
     record = dict(row)
+    if action == "monitor":
+        return configure_checkpoint(db, args, record)
+    if action == "checkpoint":
+        return observe_checkpoint(db, args, record, stamp)
     if action == "show":
+        plan = checkpoint(db, key)
+        if plan:
+            record["checkpoint"] = plan
         added = [dict(row) for row in db.execute("""SELECT key,requirement,handoff,required,acknowledgement,
             acknowledgement_turn,send_denial FROM dispatch_additions
             WHERE parent=? ORDER BY key""", (key,))]

@@ -64,6 +64,19 @@ The primary chat owns intake, coordination, review, delivery, and cleanup. It an
 
 5. Use `dispatch show` with either key to inspect the handoff. The heartbeat lists unfinished sends and required handoffs awaiting acknowledgement in `pending_handoffs`. Keep an unresolved change visible, even if the original turn has ended. Retry with the same key and options to recover the recorded route. Native delivery can occur during the current turn or in a later turn. Check the worker response and the revised result before closing the assignment.
 
+## Monitor one checkpoint on an active dispatch
+
+If an assignment has a checkpoint with one expected value, register it on the original dispatch. Use a short lowercase identifier for the expected value. Record a correction already covered by the dispatch's approved scope.
+
+```sh
+python3 ../../codexos.py dispatch monitor parser-fix --expected synthetic-fixture \
+    --correction 'Run the parser check against the approved synthetic fixture and retain its result'
+```
+
+Ask the worker to publish a commentary item with the value it actually used, for example `CodexOS checkpoint parser-fix synthetic-fixture`. Use the checkpoint for a concrete choice, such as the fixture or target actually used. The desktop operational heartbeat reads up to 20 recent items from the current turn of each monitored active worker in its usual rotation. It matches the native host, chat and turn before looking for the latest checkpoint for that assignment. Silence or an unavailable snapshot leaves the dispatch open.
+
+On a conflicting checkpoint, the heartbeat records its native turn and item reference and queues one required correction on the original dispatch. The pulse lists the new entry under `worker_checkpoints` and later ticks continue to expose any pending handoff. The coordinator checks the evidence and uses the normal reuse procedure to record a verified send approval with `dispatch permissions CORRECTION_KEY` before claiming the handoff. After the worker receives the correction, ask it to include the correction key as a fourth field in its checkpoint, for example `CodexOS checkpoint parser-fix synthetic-fixture CORRECTION_KEY`. Verify and record acknowledgement of the handoff using the same procedure as for other required changes. The heartbeat can then record the matching recovery checkpoint while the worker is active. Check the actual deliverable through normal dispatch review. Use the worker chat and the saved turn and item reference to resolve any discrepancy.
+
 ## Notify the Chief when work finishes
 
 During setup, the operator can authorize a worker to send one completion message to the registered primary chat. Record the exact chat, turn and user message in the local manifest as `completion_authorization`. At intake, verify the cited human instruction covers this destination and payload. Give the worker that reference, the dispatch key and the exact destination from `primary_thread`. Establish the same details in the intake request when the grant is missing.
@@ -74,7 +87,7 @@ The completion message starts a coordinator turn. Match the native sender to the
 
 ## Review, deliver, and clean up
 
-Use `dispatch show KEY` for a status question and `dispatch list` for bounded coordinator reconciliation. On each desktop heartbeat, review `workers_to_review` even when no completion notice arrived. The script takes one immediate native snapshot for bound, undelivered workers in the CLI's rotated `workers_to_check` list of up to three dispatches. It returns the bound worker and host with the latest terminal turn ID and status when the exact chat is idle. Read the receipt or the result in that worker chat and verify the outcome. A terminal turn establishes that execution ended. Active, unavailable, mismatched and incomplete snapshots leave the dispatch open for another pass. When running only the CLI, query the listed bound workers through the native status interface before beginning review. On confirmed failure, record `dispatch abandon KEY --evidence TEXT` and tell the operator which work remains.
+Use `dispatch show KEY` for a status question and `dispatch list` for bounded coordinator reconciliation. On each desktop heartbeat, review `workers_to_review` even when no completion notice arrived. The script takes one immediate native snapshot for bound, undelivered workers in the CLI's rotated `workers_to_check` list of up to three dispatches. It returns the bound worker and host with the latest terminal turn ID and status when the exact chat is idle. Read the receipt or the result in that worker chat and verify the outcome. A terminal turn establishes that execution ended. Active, unavailable, mismatched and incomplete snapshots leave the dispatch open for another pass. Checkpoint monitoring on active workers is opt-in. When running only the CLI, query the listed bound workers through the native status interface before beginning review. On confirmed failure, record `dispatch abandon KEY --evidence TEXT` and tell the operator which work remains.
 
 When the worker finishes, preserve its deliverable and evidence in the approved project. Run `dispatch report KEY --evidence TEXT` with a durable reference to the exact result, such as a commit or versioned artifact. For each required change, record the worker acknowledgement first and confirm that this result covers it. Add `--covers REQUIREMENT_KEY` once per required change. If the original result predates the revision, keep the dispatch open and look for the revised result.
 
