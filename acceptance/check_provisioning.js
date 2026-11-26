@@ -1,7 +1,7 @@
 // Run the checked-in desktop adapter with real CLI commands and controlled native Codex replies.
 const assert = require("node:assert/strict");
 const {execFileSync} = require("node:child_process");
-const {readFileSync} = require("node:fs");
+const {readFileSync, writeFileSync, unlinkSync} = require("node:fs");
 const {join} = require("node:path");
 const provisionBot = eval(readFileSync(join(__dirname, "../provision-bot.js"), "utf8"));
 const [, , fleet, python] = process.argv;
@@ -26,8 +26,12 @@ function nativeLaunch(prompt) {
     };
 }
 
-function scenario(id) {
-    cli("create-bot", id, "--name", "Trial specialist", "--mission", "Exercise startup");
+const createArgs = id => ["create-bot", id, "--name", "Trial specialist", "--mission", "Exercise startup"];
+
+function scenario(id, setupFile) {
+    const args = createArgs(id);
+    if (setupFile) args.push("--setup", setupFile);
+    cli(...args);
     const directory = join(fleet, "bots", id);
     const project = {projectId, hostId, projectKind: "local", path: directory};
     const chat = {id: chatId, hostId, projectId, kind: "codex", cwd: directory, title: "CodexOS Main - " + id};
@@ -88,11 +92,68 @@ function scenario(id) {
         assert.equal(manifest().lifecycle, "active");
         assert.equal(manifest().primary_thread, chatId);
     };
-    return {plan, project, chat, proposed, active, run: () => provisionBot(tools, chief, id)};
+    return {plan, project, chat, manifest, proposed, active, run: () => provisionBot(tools, chief, id)};
 }
 
 async function check() {
-    const trial = scenario("delivery-tracker");
+    const choices = {
+        audience: "Release leads",
+        voice: "Lead with the outcome",
+        trigger: "On request",
+        result: "A release brief with evidence",
+        preferences: ["Use Phoenix time"],
+        approval: "fixture-approval-turn",
+    };
+    const scope = {
+        approved_sources: ["inbox/releases.json"],
+        capabilities: ["Read approved release evidence"],
+    };
+    const setupFile = join(chief, "state/setup.json");
+    const confirmed = {...choices, ...scope, quiet_memory: "approved"};
+    const saveSetup = setup => writeFileSync(setupFile, JSON.stringify(setup));
+    saveSetup(confirmed);
+    const trial = scenario("delivery-tracker", setupFile);
+    const retry = [...createArgs("delivery-tracker"), "--setup", setupFile];
+    assert.deepEqual(cli(...retry), trial.manifest());
+    assert.deepEqual(trial.manifest().setup, choices);
+    for (const [field, value] of Object.entries(scope)) assert.deepEqual(trial.manifest()[field], value);
+    assert.equal(trial.manifest().memory.quiet, "approved");
+    assert.match(readFileSync(join(trial.project.path, "AGENTS.md"), "utf8"), /use its audience or voice/);
+    const instructions = readFileSync(join(trial.project.path, "MEMORY.md"), "utf8");
+    assert.match(instructions, /before the final reply/);
+    assert.match(instructions, /memory add KEY CONTENT --quiet/);
+    assert.match(instructions, /Omit routine saves from replies/);
+    assert.match(instructions, /denied, unspecified, or absent, skip quiet capture/);
+
+    saveSetup({...confirmed, quiet_memory: "denied"});
+    const quietWrite = ["memory", "add", "review-time", "Use Phoenix time",
+        "--quiet", "--category", "preference", "--source", "operator", "--evidence", "fixture-turn"];
+    const invalidCLI = (args, expected) => assert.throws(() => execFileSync(python, [join(fleet, "codexos.py"), ...args], {
+        cwd: chief, encoding: "utf8", stdio: "pipe",
+    }), {stderr: expected});
+    invalidCLI(retry, /already belongs to a different setup/);
+
+    const denied = scenario("declined-memory", setupFile);
+    assert.equal(denied.manifest().memory.quiet, "denied");
+    saveSetup(choices);
+    const unspecified = scenario("unspecified-memory", setupFile);
+    assert.equal(unspecified.manifest().memory.quiet, "unspecified");
+    assert.deepEqual(unspecified.manifest().capabilities, []);
+    assert.deepEqual(unspecified.manifest().approved_sources, []);
+    saveSetup({...choices, quiet_memory: true});
+    invalidCLI([...createArgs("invalid-approval"), "--setup", setupFile], /quiet_memory must be approved, denied or unspecified/);
+    unlinkSync(setupFile);
+
+    for (const id of ["declined-memory", "unspecified-memory", "memory-lab"]) {
+        invalidCLI(["--bot", id, ...quietWrite], /Quiet memory requires explicit operator approval/);
+        assert.deepEqual(cli("--bot", id, "memory", "list"), []);
+    }
+
+    cli("--bot", "delivery-tracker", ...quietWrite);
+    const preference = cli("--bot", "delivery-tracker", "memory", "preferences")[0];
+    assert.equal(preference.content, "Use Phoenix time");
+    assert.equal(preference.evidence, "fixture-turn");
+    assert.equal(preference.source, "operator");
     trial.plan.projects = [
         {...trial.project, path: trial.project.path + "-other"},
         {...trial.project, projectKind: "remote", hostId: "remote"},
@@ -169,8 +230,11 @@ async function check() {
     }));
     assert.equal(startup.bot, "delivery-tracker");
     assert.equal(startup.integrity, "ok");
+    assert.equal(startup.sources, 0);
     assert.equal((await trial.run()).status, "active");
     trial.active();
+    assert.deepEqual(trial.manifest().setup, choices);
+    assert.equal(trial.manifest().memory.quiet, "approved");
     trial.plan.answer = "A later conversation reply";
     assert.equal((await trial.run()).status, "active");
     assert.equal(trial.plan.launchCount, 1);

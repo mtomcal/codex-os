@@ -127,6 +127,8 @@ def commands(subparsers):
     resolve.add_argument("--latest", type=int, required=True, help="Latest known revision for optimistic concurrency")
     resolve.add_argument("--source", type=prose, required=True)
     resolve.add_argument("--evidence", type=prose, required=True, help="Evidence used to resolve the contradiction")
+    for operation in (add, resolve):
+        operation.add_argument("--quiet", action="store_true", help="Capture during an ordinary turn with operator opt-in")
     fb = subparsers.add_parser("feedback")
     fb.add_argument("id", type=identifier)
     fb.add_argument("--subject", type=prose, required=True)
@@ -301,7 +303,13 @@ def strategic(db):
     return rows or None
 
 
-def memory(db, args):
+def memory(db, args, bot):
+    if getattr(args, "quiet", False):
+        manifest = json.loads((bot / "bot.json").read_text(encoding="utf-8"))
+        if manifest.get("memory", {}).get("quiet") != "approved":
+            raise ValueError("Quiet memory requires explicit operator approval")
+        if args.action == "add" and args.category not in {"preference", "fact", "lesson"}:
+            raise ValueError("Quiet memory captures preferences, facts and lessons")
     if args.action == "preferences":
         return [dict(row) for row in db.execute("""SELECT key,content,source,evidence,rev
             FROM ledger_memory WHERE category='preference' AND source='operator'
@@ -369,7 +377,7 @@ def run(db, args, root, bot):
     if args.command == "strategic":
         return strategic(db)
     if args.command == "memory":
-        return memory(db, args)
+        return memory(db, args, bot)
     if args.command == "feedback":
         old = db.execute("SELECT * FROM ledger_feedback WHERE id=?", (args.id,)).fetchone()
         if old:

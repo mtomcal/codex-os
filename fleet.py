@@ -41,6 +41,7 @@ def commands(subparsers):
     create.add_argument("id", help="Lowercase identifier, e.g. delivery-tracker")
     create.add_argument("--name", required=True)
     create.add_argument("--mission", required=True)
+    create.add_argument("--setup", type=Path, help="Confirmed setup JSON (see docs/fleet.md)")
     provision = subparsers.add_parser("provision-bot", help="Record local state for desktop bot provisioning")
     provision.add_argument("id")
     operations = provision.add_mutually_exclusive_group()
@@ -78,7 +79,40 @@ def _record(directory):
     return record
 
 
-def _create(root, identifier, name, mission, parent, *, bootstrap=False):
+def _setup(path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    fields = {"audience", "voice", "trigger", "result", "preferences", "approval",
+              "approved_sources", "capabilities", "quiet_memory"}
+    if not isinstance(data, dict) or data.keys() - fields:
+        raise ValueError("Use the setup fields documented in docs/fleet.md")
+
+    def line(value, field):
+        if not isinstance(value, str) or not value.strip() or len(value) > 500 or len(value.splitlines()) != 1:
+            raise ValueError(f"Setup {field} needs a single nonempty line of up to 500 characters")
+        return value.strip()
+
+    setup = {field: line(data.get(field), field) for field in ("trigger", "result", "approval")}
+    for field in ("audience", "voice"):
+        if field in data:
+            setup[field] = line(data[field], field)
+    if "audience" not in setup and "voice" not in setup:
+        raise ValueError("Setup needs an audience or a voice")
+
+    def lines(field):
+        values = data.get(field, [])
+        if not isinstance(values, list) or len(values) > 20:
+            raise ValueError(f"Setup {field} needs an array of up to 20 entries")
+        return [line(value, field) for value in values]
+
+    setup["preferences"] = lines("preferences")
+    quiet = data.get("quiet_memory", "unspecified")
+    if quiet not in ("approved", "denied", "unspecified"):
+        raise ValueError("Setup quiet_memory must be approved, denied or unspecified")
+    return {"setup": setup, "quiet_memory": quiet,
+            "approved_sources": lines("approved_sources"), "capabilities": lines("capabilities")}
+
+
+def _create(root, identifier, name, mission, parent, *, setup=None, bootstrap=False):
     _validate_id(identifier)
     if not name.strip() or not mission.strip():
         raise ValueError("A bot needs a name and a mission")
@@ -92,6 +126,11 @@ def _create(root, identifier, name, mission, parent, *, bootstrap=False):
         record = _record(target)
         if not bootstrap and (record["name"], record["mission"], record["parent"]) != (name, mission, parent):
             raise ValueError(f"The identifier {identifier} already belongs to a different definition")
+        if setup is not None:
+            recorded = {field: record.get(field) for field in ("setup", "approved_sources", "capabilities")}
+            recorded["quiet_memory"] = record.get("memory", {}).get("quiet")
+            if recorded != setup:
+                raise ValueError(f"The identifier {identifier} already belongs to a different setup")
         return record
 
     if target.exists() or target.is_symlink():
@@ -107,6 +146,9 @@ def _create(root, identifier, name, mission, parent, *, bootstrap=False):
         "escalation": ["access denied", "verified regression", "decision required"],
         "routines": [{"id": key, "proposed_cadence": CADENCE[key], "file": f"routines/{key}.md"} for key in routines],
     }
+    if setup is not None:
+        manifest.update({field: setup[field] for field in ("setup", "approved_sources", "capabilities")})
+        manifest["memory"]["quiet"] = setup["quiet_memory"]
     with tempfile.TemporaryDirectory(dir=bots, prefix=".draft-") as scratch:
         draft = Path(scratch) / "project"
         shutil.copytree(root / "templates" / "persistent-bot", draft)
@@ -156,7 +198,8 @@ def run(db, args, root, bot):
     if args.command == "create-bot":
         if bot != root / "bots" / CHIEF:
             raise ValueError("Create a specialist from the Chief of Staff project")
-        return _create(root, args.id, args.name, args.mission, CHIEF)
+        setup = _setup(args.setup) if args.setup is not None else None
+        return _create(root, args.id, args.name, args.mission, CHIEF, setup=setup)
     raise ValueError(f"Unknown fleet command: {args.command}")
 
 

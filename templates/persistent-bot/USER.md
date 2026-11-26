@@ -1,3 +1,3 @@
 # Operator preferences
 
-Record preferences the operator has confirmed here. Working hours, notification thresholds, corporate sources and current priorities await operator input. Routine cadences in the manifest are proposals.
+Read the confirmed setup preferences in the manifest when present. Record any later changes here only when the operator confirms them. Routine cadences in the manifest are proposals.

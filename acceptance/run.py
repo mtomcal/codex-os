@@ -25,7 +25,7 @@ def main():
         jobs = [
             ("Fleet unit and integration tests", ["-m", "unittest", "discover", "-s", "tests", "-v"]),
             ("Disposable bot creation and teardown", ["acceptance/check_cleanup.py"]),
-            ("Resumable desktop bot provisioning", ["acceptance/check_provisioning.py"]),
+            ("Guided setup and resumable desktop bot provisioning", ["acceptance/check_provisioning.py"]),
             ("Delegated worker archive requirements", ["acceptance/check_worker_archive.py"]),
             ("Fresh fleet CLI replay", ["acceptance/replay.py", "--output", str(out/"fleet.json")]),
             ("Fleet Maintainer candidate comparison", ["acceptance/maintainer/review.py", "--output", str(out/"review.json")]),

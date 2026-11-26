@@ -2,18 +2,36 @@
 
 The factory creates a durable project directory and an inactive routine proposal. Each `bots/<id>/bot.json` describes one project. From the Chief of Staff directory, run `python3 ../../codexos.py fleet-list` to inspect the current fleet. Manifest listings describe local proposals. Check the native Codex project and schedule for deployment status.
 
-## Add a specialist
+## Guide setup in the Chief of Staff chat
 
-1. In the Chief of Staff project, describe the recurring responsibility, success criteria and approved evidence. Use the create-bot skill to provision the specialist. The CLI example below prepares its local project for review.
-2. Inspect the proposed mission, sources, memory scope, delegation limit and routine files with the operator. Record the approved source references and place permitted producer artifacts in the specialist's inbox. Register their exact paths using the monitor commands.
-3. With the operator's authorization, run the desktop provisioning check below. If it returns `waiting_for_registration`, add the exact printed folder through Codex's project picker and run the check again with the same ID. The manifest stays proposed during registration and startup. Provisioning checks the chat's project and working directory and confirms its startup before saving the primary chat ID and active status.
-4. In that chat, run `python3 ../../codexos.py heartbeat` manually. The first valid observation supplies the baseline. An empty approved source list should yield a quiet run.
-5. Review each proposed routine's file, time zone, working hours and cadence. For each approved routine, use the Codex automation interface to register the schedule and prompt below. Select the project's existing primary chat where supported. If the client offers a separate local run, select the same project directory and verify the state is reachable. An isolated copy needs an approved shared state configuration before use. If neither path is available, run the routine manually.
-6. Confirm the next scheduled time in the Codex interface. Inspect the first run for the selected directory, accessible state, output and duplicate alerts. To pause a bot, pause each native schedule, then update its manifest lifecycle. The native schedule controls execution.
+1. Confirm a stable bot ID, display name, and one-sentence mission. Ask who will use the result or what voice they prefer.
+2. Confirm when the bot should act, what it should return, and any standing work or communication preferences. Reuse answers the operator already gave.
+3. Review only the tools, actions, and exact sources needed for the mission. Ask whether the bot may quietly save durable preferences, corrections, and verified lessons in its private ledger during ordinary turns. Explain that approved saves need no separate request or routine announcement. Record explicit consent as `approved`, an explicit refusal as `denied`, and an unanswered choice as `unspecified`. Keep quiet capture off without explicit consent.
+4. Show one brief summary with the name, ID, mission, audience or voice, trigger, result, preferences, scope, and quiet-memory choice. Ask the operator to approve the summary. State that scope records the intended work and Codex still enforces tool access and sandbox restrictions. Request separate authorization for source access or registration, integrations, external messages, project registration, bot activation, and schedule activation as applicable.
+5. After approval, save the confirmed choices as JSON under the Chief's `state/`, for example `state/delivery-tracker-setup.json`. Use the operator's approval link or chat and turn reference for `approval`. Retain references and short choices without credentials, raw logs, or transcripts. Pass the file with `--setup` and review the returned proposed manifest against the approved summary.
+6. With authorization for project registration and bot activation, run the desktop check below. Report a bot as ready only when the check returns `active`. If it returns `waiting_for_registration`, have the operator add the exact printed folder through Codex's project picker and resume with the same ID.
+
+This example records a confirmed setup. Include at least one of `audience` or `voice`. Use empty arrays for preferences or scope with no approved entries.
+
+```json
+{
+  "audience": "Engineering leads",
+  "voice": "Lead with the milestone at risk",
+  "trigger": "On request",
+  "result": "A short report with each overdue dependency, its owner, and the source",
+  "preferences": ["Use Phoenix time for deadlines"],
+  "approval": "Reference to the operator's approval turn",
+  "capabilities": ["Read approved local evidence", "Write project reports"],
+  "approved_sources": ["inbox/milestones.json"],
+  "quiet_memory": "approved"
+}
+```
 
 ```sh
-python3 ../../codexos.py create-bot delivery-tracker --name 'Delivery Tracker' --mission 'Review local milestone evidence and identify overdue dependencies.'
+python3 ../../codexos.py create-bot delivery-tracker --name 'Delivery Tracker' --mission 'Review local milestone evidence and identify overdue dependencies.' --setup state/delivery-tracker-setup.json
 ```
+
+The factory saves the choices and approval reference in `bot.json`. Generated instructions read them on startup and after chat replacement. An omitted `quiet_memory` field becomes `unspecified`. Existing callers can still omit `--setup`. The factory prepares a project without scheduling work or granting native permissions.
 
 From the Chief of Staff project, run the desktop check in the Codex code-mode tool. Use the Chief's absolute directory for `workdir` if the chat runs elsewhere.
 
@@ -26,9 +44,17 @@ text(result);
 
 Resume the same check after the startup turn finishes. If verification fails, use the returned prompt in the existing main chat. If Codex cannot confirm a launch, check the project's chats before creating anything manually. Provisioning records the launch attempt and leaves ambiguous launches pending. If the sandbox requires approval to save the target manifest, pass `{approveManifestWrite: true}` as the fourth argument to request access for that CLI step.
 
+## Configure approved sources and routines
+
+Place permitted producer artifacts in the specialist's inbox. Register their exact paths using the monitor commands with the operator's authorization. In the verified main chat, run one manual heartbeat to establish the baseline. An empty registered source list should yield a quiet run.
+
+Review each proposed routine's file, time zone, working hours, and cadence. Use Codex automations to register each approved schedule. Select the project's existing primary chat where supported. If Codex offers a separate local run, select the same project directory and verify the state is reachable. An isolated copy needs approved access to shared state. If neither path is available, run the routine manually.
+
 Use the actual relative routine filename from `bot.json` in this prompt.
 
 > In this bot's project directory, read AGENTS.md. Execute routines/heartbeat.md once. Report an actionable finding with its evidence. End quietly when the routine returns no finding.
+
+Confirm the next scheduled time in Codex. Inspect the first run for the selected directory, accessible state, output, and duplicate alerts. To pause a bot, pause its native schedules, then update its manifest lifecycle.
 
 ## Route an investigation
 
@@ -44,7 +70,7 @@ In the specialist project, use `mailbox list` to read the assignment. After chec
 
 Open the same project directory. Read the manifest, instructions, core memory and open work. If the previous primary chat is unavailable, start one replacement chat and update the reviewed reference. Check native schedules for obsolete bindings and duplicate wakeups before reattaching a routine. Use the same local state directory to preserve baselines, cooldowns and commitments.
 
-A second factory call with the same ID, name and mission returns the existing project. A conflicting definition fails. Existing project instructions, private notes, lifecycle and state survive bootstrap. To revise a bot, review its files with the operator and keep a record of the accepted change.
+Retry guided creation with the same ID, name, mission, and confirmed setup file. The factory returns the existing project. A conflicting definition or setup fails. If creation already succeeded, recover the approved choices from `bot.json` and resume the desktop check with the same bot ID. Existing project instructions, private notes, lifecycle and state survive bootstrap. To revise a bot, review its files with the operator and keep a record of the accepted change.
 
 ## Select the persistent model
 
