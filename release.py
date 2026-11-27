@@ -27,6 +27,7 @@ def commands(sub):
     verify.add_argument("receipt", type=Path)
     verify.add_argument("--remote", required=True, help="Approved Git remote name in the current checkout")
     verify.add_argument("--pr", type=positive_number, required=True, help="Pull request number on that remote")
+    verify.add_argument("--for-merge", action="store_true", help="Require the live Codex check attestation")
 
 
 def git(*args, failure):
@@ -43,20 +44,23 @@ def git(*args, failure):
 
 
 def evidence(receipt, kind, head):
+    name = kind.replace("_", " ").capitalize()
     entry = receipt.get(kind)
     if not isinstance(entry, dict) or entry.get("head") != head:
-        raise ValueError(f"{kind.capitalize()} evidence must name the exact receipt head")
+        raise ValueError(f"{name} evidence must name the exact receipt head")
     reference = entry.get("evidence")
-    if entry.get("result") != "passed" or not isinstance(reference, str) or not reference.strip():
-        raise ValueError(f"{kind.capitalize()} requires a passing result and an evidence file")
+    allowed_results = ("passed", "not_applicable") if kind == "live_checks" else ("passed",)
+    if entry.get("result") not in allowed_results or not isinstance(reference, str) or not reference.strip():
+        requirement = "a passing result or a not_applicable decision" if kind == "live_checks" else "a passing result"
+        raise ValueError(f"{name} requires {requirement} and an evidence file")
     digest = entry.get("sha256")
     if not isinstance(digest, str) or not SHA256.fullmatch(digest):
-        raise ValueError(f"{kind.capitalize()} requires the SHA-256 of its evidence file")
+        raise ValueError(f"{name} requires the SHA-256 of its evidence file")
     return entry
 
 
 def verify_artifact(folder, kind, entry, head, tree):
-    name = kind.capitalize()
+    name = kind.replace("_", " ").capitalize()
     path = folder / entry["evidence"]
     try:
         with directory(path.parent) as source:
@@ -69,7 +73,9 @@ def verify_artifact(folder, kind, entry, head, tree):
         artifact = json.loads(data)
     except ValueError:
         raise ValueError(f"{name} artifact must be valid JSON") from None
-    if not isinstance(artifact, dict) or artifact.get("kind") != kind or artifact.get("result") != "passed":
+    if not isinstance(artifact, dict) or artifact.get("kind") != kind or artifact.get("result") != entry["result"]:
+        if kind == "live_checks":
+            raise ValueError("Live checks artifact must match the receipt decision")
         raise ValueError(f"{name} artifact must record a passing {kind} result")
     if artifact.get("head") != head:
         raise ValueError(f"{name} artifact names a different head")
@@ -119,7 +125,10 @@ def verify(args):
     if acceptance.get("tree") != tree:
         raise ValueError("Acceptance evidence does not match the receipt head tree")
 
-    for kind, entry in (("acceptance", acceptance), ("review", review), ("privacy", privacy)):
+    entries = {"acceptance": acceptance, "review": review, "privacy": privacy}
+    if args.for_merge:
+        entries["live_checks"] = evidence(receipt, "live_checks", head)
+    for kind, entry in entries.items():
         verify_artifact(args.receipt.parent, kind, entry, head, tree)
 
     url = git("remote", "get-url", "--", args.remote, failure="Cannot resolve the selected Git remote")
@@ -131,10 +140,14 @@ def verify(args):
     if published != f"{head}\t{ref}":
         raise ValueError("Published PR head differs from the receipt head. Refresh evidence for the current head.")
 
-    return {
+    result = {
         "result": "verified", "pr": args.pr, "head": head, "tree": tree,
         "acceptance": acceptance["evidence"], "review": review["evidence"], "privacy": privacy["evidence"],
         "receipt_sha256": hashlib.sha256(raw).hexdigest(),
         "publication": {"remote": args.remote, "repository": url, "ref": ref, "head": head,
                         "observed_at": datetime.now(timezone.utc).isoformat()},
     }
+    if args.for_merge:
+        live_checks = entries["live_checks"]
+        result["live_checks"] = {"result": live_checks["result"], "evidence": live_checks["evidence"]}
+    return result
