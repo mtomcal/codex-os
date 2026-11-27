@@ -55,6 +55,12 @@ When an existing due commitment calls for storage maintenance, review the proven
 
 Publish receipts as closed files with an atomic rename. Coordinate with producers before you release a hot copy. Release verifies durable archival before moving the matching hot file aside. The same command can finish an interrupted release. If the CLI reports that it retained a staged replacement, review the retained file before retrying. A newer publication stays at the original path.
 
+## Deliver a daily briefing
+
+Run `python3 codexos.py briefing --period day --pending` to stage a bounded page of new work revisions, findings, and due human decisions. Empty output means no briefing is pending. Work and findings unread at rollout remain eligible. A decision may become due without any ledger edit. Its current revision stays eligible until covered in a briefing or resolved.
+
+Review the page's evidence and deliver its relevant outcome. After delivery, the primary runs `python3 codexos.py briefing --period day --delivered TOKEN` with that page's `delivery_token`. A scheduled worker returns the token with its reviewed results for the primary to use. Staging and ordinary briefing reads leave the delivery checkpoint in place. Acknowledgment covers only the staged page, so newer input and later pages stay pending. If another run stages a replacement page first, the original token cannot advance the checkpoint. A routine using this same pending page can also record delivery from a morning or manual briefing.
+
 ## Track an obligation
 
 ```sh

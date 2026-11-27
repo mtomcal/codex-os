@@ -51,6 +51,8 @@ The factory saves the choices and approval reference in `bot.json`. Generated in
 
 The delegated heartbeat is the bot's only native schedule. Use `mode: "scheduled"` for calendar work and `mode: "event"` for recorded events. A scheduled routine is due at the start of its local window and each `every_minutes` interval before the end. `24:00` is valid for the end of a full day. For a Friday 5 p.m. run, start that routine at `17:00` and keep the heartbeat window open through the relevant tick. Both windows use the approved IANA time zone. Catch-up runs still need an open heartbeat window. The default tick is 15 minutes and the default catch-up is 24 hours. The approved scope includes one level of delegation in the registered bot project.
 
+For an end-of-day routine, add `"gate": "daily-briefing"` to its scheduled `timing` with `"every_minutes": 1440`. A due slot stays quiet until the local ledger has new work, findings or an eligible human decision due. The dispatcher can pick up new input later the same day. An untouched daily slot from a prior day does not run the next morning. See [daily briefing delivery](ledger.md#deliver-a-daily-briefing) for how the primary records which inputs were covered.
+
 From the Chief of Staff project, run the desktop check in the Codex code-mode tool. Use the Chief's absolute directory for `workdir` if the chat runs elsewhere.
 
 ```js

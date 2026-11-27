@@ -82,6 +82,10 @@ def factory(r):
     r.check("Project and manifest select Sol", ["gpt-6.2-sol", "gpt-6.2-sol"], [record["model"], model])
     paths = ["AGENTS.md", "SOUL.md", "USER.md", "MEMORY.md", "HEARTBEAT.md", *[row["file"] for row in record["routines"]]]
     r.check("Every startup file and proposed routine exists", [], [path for path in paths if not (r.bot / path).is_file()])
+    heartbeat = (r.bot / "routines" / "heartbeat.md").read_text()
+    r.check("Generated desktop review uses the batched worker result", True,
+            "Review each entry in `workers_to_review`" in heartbeat
+            and "only when recovering with the fleet CLI alone" in heartbeat)
     (r.bot / "USER.md").write_text("Synthetic operator preference")
     r.cli("init", bot=None)
     r.cli(*CREATE, bot=CHIEF)
@@ -189,6 +193,12 @@ def monitor(r):
     r.evaluation(9,83,blockers=["waiting-for-artifact"])
     r.check("Same blocker persists across a new run without another alert",None,r.cli("heartbeat"))
     r.check("Other bot's operational findings stay private",[],r.cli("findings",bot=CHIEF))
+    staged = r.cli("briefing", "--period", "day", "--pending")
+    r.check("Pending briefing includes retained findings and brief-only changes",
+            ["improvement", "regression", "changed", "changed", "stagnation", "changed", "attention", "changed"],
+            [finding["kind"] for finding in staged["findings"]])
+    r.cli("briefing", "--period", "day", "--delivered", staged["delivery_token"])
+    r.check("Delivered findings do not wake the briefing again", None, r.cli("briefing", "--pending"))
 
 
 def reliability(r):

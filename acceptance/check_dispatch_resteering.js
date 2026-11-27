@@ -32,7 +32,7 @@ async function replay(root) {
 
     const parent = "parser-fix";
     const key = "parser-whitespace";
-    const requirement = "Include a whitespace-only input case with an empty result";
+    const requirement = "Resolve the independent review blocker: include a whitespace-only input case with an empty result";
     const target = {threadId: "11111111-1111-4111-8111-111111111111", hostId: "local"};
     const original = {id: "original-turn", status: "inProgress", items: []};
     const followup = {id: "revised-turn", status: "inProgress", items: []};
@@ -139,6 +139,8 @@ async function replay(root) {
     assert.equal(dispatch(...reserve, "--scope", scope).launch, false);
     assert.equal(dispatch(...claim).send, false);
     reject(/exactly these required handoffs/, "report", parent, "--evidence", stale);
+    assert.equal(dispatch("show", parent).state, "running");
+    reject(/Cannot delivered a dispatch in state running/, "delivered", parent, "--evidence", stale);
     assert.deepEqual((await pulse()).workers_to_review, []);
 
     const revised = "revised-cases.json";
