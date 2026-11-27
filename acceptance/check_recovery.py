@@ -38,7 +38,7 @@ class Recovery(unittest.TestCase):
         shutil.copytree(ROOT / "templates", fleet / "templates")
         bot = fleet / "bots" / "briefing-test"
         chief = bot.with_name("chief-of-staff")
-        midnight = START - 12 * 3600
+        midnight = START - 5 * 3600
         clock = midnight
 
         def cli(*args, cwd=bot):
@@ -50,9 +50,12 @@ class Recovery(unittest.TestCase):
             self.assertEqual(reply.returncode, 0, reply.stderr)
             return json.loads(reply.stdout) if reply.stdout else None
 
-        def tick():
+        def pulse():
             return cli("schedule", "tick", "--project", "fixture-project",
-                       "--chat", CHAT, "--automation", "fixture-heartbeat")["work"]
+                       "--chat", CHAT, "--automation", "fixture-heartbeat")
+
+        def tick():
+            return pulse()["work"]
 
         def deliver(page):
             self.assertEqual(cli("briefing", "--delivered", page["delivery_token"]), {"delivered": True})
@@ -63,7 +66,7 @@ class Recovery(unittest.TestCase):
         setup.write_text(json.dumps({
             "audience": "Operator", "trigger": "Daily heartbeat", "result": "Local briefing",
             "approval": "Synthetic setup approval",
-            "delegated_heartbeat": {"timezone": "UTC", "scope": "Read the local evidence",
+            "delegated_heartbeat": {"timezone": "America/Phoenix", "scope": "Read the local evidence",
                                     "window": {"days": days, "start": "00:00", "end": "24:00"}},
             "routines": [{"id": "end-of-day", "mode": "scheduled", "timing": {
                 "window": {"days": days, "start": "16:45", "end": "16:46"},
@@ -80,7 +83,7 @@ class Recovery(unittest.TestCase):
 
         item = ["--title", "Fixture decision", "--objective", "Release", "--owner", "Operator",
                 "--criteria", "Approved evidence", "--next-action", "Ask for confirmation"]
-        cli("commitment", "add", "approval", *item, "--human", "yes", "--due", "2026-01-01T16:46:00Z")
+        cli("commitment", "add", "approval", *item, "--human", "yes", "--due", "2026-01-01T16:46:00-07:00")
         original = cli("briefing", "--pending")
         self.assertEqual([row["id"] for row in original["work_changes"]], ["approval"])
         self.assertEqual(original["due_decisions"], [])
@@ -120,6 +123,32 @@ class Recovery(unittest.TestCase):
         self.assertNotEqual(retried["token"], next_day["token"])
         self.assertEqual(cli("schedule", "request-worker", next_day["id"], next_day["token"]), {"launch": False})
         self.assertEqual(cli("schedule", "request-worker", retried["id"], retried["token"]), {"launch": True})
+
+        clock = midnight + 2 * 86400 + 9 * 3600
+        self.assertIn(retried["id"], [row["id"] for row in pulse()["recover"]])
+        self.assertTrue(cli("schedule", "start", retried["id"], retried["token"])["start"])
+        cli("schedule", "finish", retried["id"], retried["token"], "--decision", "done",
+            "--evidence", "Recovered the already requested worker")
+
+        clock = midnight + 2 * 86400 + 16 * 3600 + 46 * 60
+        overnight, = tick()
+        clock += 19 * 60  # Already tomorrow in UTC, still today in Phoenix.
+        self.assertEqual(tick(), [overnight])
+        clock = midnight + 3 * 86400 + 9 * 3600
+        result = pulse()
+        self.assertEqual(result["work"], [], "Untouched daily claims expire at local midnight")
+        self.assertNotIn(overnight["id"], [row["id"] for row in result["recover"]])
+
+        for day, operation, field in ((3, "request-worker", "launch"), (4, "start", "start")):
+            clock = midnight + day * 86400 + 16 * 3600 + 46 * 60
+            stale, = tick()
+            self.assertNotEqual(stale["id"], overnight["id"])
+            clock = midnight + (day + 1) * 86400
+            self.assertEqual(cli("schedule", operation, stale["id"], stale["token"]), {field: False})
+            self.assertEqual(tick(), [])
+
+        self.assertEqual([row["id"] for row in cli("briefing", "--pending")["work_changes"]],
+                         ["after-delivery"], "Expiring a slot preserves undelivered briefing material")
 
     def replay(self, fleet):
         for source in ROOT.glob("*.py"):
