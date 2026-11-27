@@ -69,32 +69,61 @@
     const envelope = "<codex_delegation>\n  <source_thread_id>" + primary +
         "</source_thread_id>\n  <input>" + prompt + "</input>\n</codex_delegation>";
 
-    async function hasAssignment(id) {
+    function validateCursor(cursor, seen) {
+        if (cursor === null) return;
+        if (typeof cursor !== "string" || !cursor || seen.has(cursor))
+            throw Error("Invalid worker detail cursor");
+        seen.add(cursor);
+    }
+
+    async function hasAssignment(candidate) {
+        const {id} = candidate;
         const args = {threadId: id, hostId, includeOutputs: true, maxOutputCharsPerItem: 20000};
+        const seen = new Set();
         let cursor, turn;
         for (let page = 0; page < 5; page++) {
             const detail = await native("read_thread", {...args, cursor, turnLimit: 10, itemLimit: 100});
-            if (detail.thread?.id !== id || !matchesChat(detail.thread)) return false;
-            turn = detail.turns.at(-1);
-            cursor = detail.page?.nextCursor;
-            if (!cursor) break;
+            const {thread, page: pagination, turns} = detail;
+            if (thread?.id !== id || !matchesChat(thread) || thread.title !== candidate.title ||
+                (thread.projectId != null && thread.projectId !== projectId) ||
+                (approvedEnvironment.type === "worktree" && (!nonempty(thread.cwd) ||
+                    (candidate.cwd != null && thread.cwd !== candidate.cwd))))
+                throw Error("Worker detail differs from native history");
+            if (!Array.isArray(turns) || !turns.length || pagination?.order !== "newest_first" ||
+                pagination.hasMore !== (pagination.nextCursor !== null))
+                throw Error("Worker turn history incomplete");
+            turn = turns.at(-1);
+            cursor = pagination.nextCursor;
+            validateCursor(cursor, seen);
+            if (cursor === null) break;
         }
-        if (cursor || !turn) throw Error("Initial worker turn unavailable");
-        let {items, nextItemCursor} = turn;
-        for (let page = 0; nextItemCursor && page < 5; page++) {
-            ({items, nextItemCursor} = await native("read_thread", {...args, itemCursor: nextItemCursor, itemLimit: 100}));
+        if (cursor !== null || !nonempty(turn?.id)) throw Error("Initial worker turn unavailable");
+
+        let {items, nextItemCursor = null} = turn;
+        seen.clear();
+        for (let page = 0; page < 5; page++) {
+            if (!Array.isArray(items) || !items.length) throw Error("Initial worker item unavailable");
+            validateCursor(nextItemCursor, seen);
+            if (nextItemCursor === null) break;
+            const detail = await native("read_thread", {...args, itemCursor: nextItemCursor, itemLimit: 100});
+            if (detail.threadId !== id || detail.turnId !== turn.id)
+                throw Error("Worker item page differs from its chat or turn");
+            ({items, nextItemCursor} = detail);
         }
-        if (nextItemCursor || !items?.length) throw Error("Initial worker item unavailable");
+        if (nextItemCursor !== null || !Array.isArray(items) || !items.length)
+            throw Error("Initial worker item unavailable");
         const [input] = items;
-        if (input.type !== "functionCallOutput" || input.namespace !== "codex_app" || input.name !== "create_thread")
-            return false;
-        if (input.output?.truncated !== false || typeof input.output.text !== "string")
+        if (input?.type !== "functionCallOutput" || input.namespace !== "codex_app" || input.name !== "create_thread" ||
+            input.output?.truncated !== false || typeof input.output.text !== "string")
             throw Error("Initial worker assignment unavailable");
+        const assignment = /^<codex_delegation>\n  <source_thread_id>([^\n]+)<\/source_thread_id>\n  <input>([\s\S]+)<\/input>\n<\/codex_delegation>$/.exec(input.output.text);
+        if (!assignment || assignment[0] !== input.output.text || !validChat(assignment[1]) || !nonempty(assignment[2]))
+            throw Error("Initial worker assignment invalid");
         return input.output.text === envelope;
     }
 
     async function recover(record) {
-        const candidates = new Set();
+        const candidates = new Map();
         let matches;
         try {
             for (const archived of [false, true]) {
@@ -103,7 +132,7 @@
                     const history = await native("list_threads", {mode: "history", hostId, archived, cursor, limit: 50});
                     for (const chat of history.threads) {
                         if (chat.projectId === projectId && chat.title === title && matchesChat(chat))
-                            candidates.add(chat.id);
+                            candidates.set(chat.id, chat);
                     }
                     cursor = history.nextCursor;
                     if (!cursor) break;
@@ -111,8 +140,8 @@
                 if (cursor) throw Error("Worker history search incomplete");
             }
             matches = [];
-            for (const id of candidates) {
-                if (await hasAssignment(id)) matches.push(id);
+            for (const chat of candidates.values()) {
+                if (await hasAssignment(chat)) matches.push(chat.id);
             }
         } catch {
             return pending(record, "native_worker_history_unavailable");

@@ -37,8 +37,10 @@ async function run(root) {
     const show = key => ledger("show", key);
     const launches = [];
     let candidates = [];
-    let detailChanges = {};
-    let changeCompetingOutput;
+    let competingWorker = worker;
+    let changeCompetingDetail;
+    let changeCompetingItems;
+    let pageCompetingHistory = false;
     let currentChat = coordinator;
     const desktop = {
         async exec_command({cmd, workdir}) {
@@ -57,16 +59,34 @@ async function run(root) {
             assert.equal(host, hostId);
             return reply({...fixture.history, threads: archived ? [] : candidates});
         },
-        async mcp__codex_app__read_thread({threadId, hostId: host, includeOutputs}) {
+        async mcp__codex_app__read_thread({threadId, hostId: host, includeOutputs, cursor, itemCursor}) {
             assert.equal(host, hostId);
             assert.equal(includeOutputs, true);
-            const input = structuredClone(fixture.detail);
-            input.thread = {...input.thread, id: threadId, ...detailChanges};
-            const output = input.turns[0].items[0].output;
-            output.text = output.text.replace("Sample assignment", launches.at(-1).prompt);
-            output.originalChars = output.text.length;
-            if (threadId === worker) changeCompetingOutput?.(output);
-            return reply(input);
+            const detail = structuredClone(fixture.detail);
+            detail.thread.id = threadId;
+            detail.thread.title = launches.at(-1).title;
+            detail.thread.cwd = candidates.find(chat => chat.id === threadId).cwd;
+            const [turn] = detail.turns;
+            const [initialItem] = turn.items;
+            initialItem.output.text = initialItem.output.text.replace("Sample assignment", launches.at(-1).prompt);
+            if (threadId !== competingWorker) return reply(detail);
+
+            if (pageCompetingHistory) {
+                initialItem.output.text = initialItem.output.text.replace("Parser files only", "Other scope");
+                if (itemCursor === "older-items") {
+                    const items = {...fixture.itemPage, items: [initialItem]};
+                    changeCompetingItems?.(items);
+                    return reply(items);
+                }
+                turn.items = [{type: "agentMessage"}];
+                turn.nextItemCursor = "older-items";
+                if (!cursor) {
+                    turn.id = "newer-turn";
+                    detail.page = {...detail.page, hasMore: true, nextCursor: "older-turn"};
+                }
+            }
+            changeCompetingDetail?.(detail, cursor);
+            return reply(detail);
         },
         async mcp__codex_app__create_thread(args) {
             launches.push(args);
@@ -165,29 +185,103 @@ async function run(root) {
     assert.equal(show("interrupted").worker, null);
     candidates = [candidate({id: second, projectId: "wrong"}), candidate({id: coordinator})];
     assert.equal((await dispatch("interrupted")).blocker, "native_launch_unconfirmed");
-    candidates = [candidate({id: second})];
-    detailChanges = {hostId: "other-host"};
-    assert.equal((await dispatch("interrupted")).blocker, "native_launch_unconfirmed");
+    changeCompetingDetail = detail => { detail.thread.hostId = "other-host"; };
+    candidates = [candidate({})];
+    assert.equal((await dispatch("interrupted")).blocker, "native_worker_history_unavailable");
     assert.equal(show("interrupted").worker, null);
-    detailChanges = {};
-    candidates.push(candidate({}));
+    changeCompetingDetail = undefined;
+    candidates = [candidate({id: second}), candidate({})];
     assert.equal((await dispatch("interrupted")).blocker, "native_worker_ambiguous");
     assert.equal(show("interrupted").worker, null);
+
+    async function assertPending(shape, tools = desktop) {
+        const result = await dispatch("interrupted", tools);
+        assert.equal(show("interrupted").worker, null, `A competing assignment with ${shape} must keep recovery unbound`);
+        assert.equal(result.blocker, "native_worker_history_unavailable", shape);
+        assert.equal(result.launch, false, shape);
+        assert.equal(show("interrupted").launch_issued, 1, shape);
+        assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1, shape);
+    }
+
+    for (const [shape, changeThread] of [
+        ["mismatched chat ID", thread => { thread.id = second; }],
+        ["omitted chat ID", thread => { delete thread.id; }],
+        ["mismatched host", thread => { thread.hostId = "other-host"; }],
+        ["omitted host", thread => { delete thread.hostId; }],
+        ["mismatched kind", thread => { thread.kind = "chatgpt"; }],
+        ["mismatched project", thread => { thread.projectId = "other-project"; }],
+        ["mismatched cwd", thread => { thread.cwd = "/fixture/other"; }],
+        ["omitted cwd", thread => { delete thread.cwd; }],
+        ["mismatched title", thread => { thread.title = "Other worker"; }],
+        ["omitted title", thread => { delete thread.title; }],
+    ]) {
+        changeCompetingDetail = detail => changeThread(detail.thread);
+        await assertPending(shape);
+    }
+    for (const [shape, changeDetail] of [
+        ["missing thread metadata", detail => { delete detail.thread; }],
+        ["missing turn page metadata", detail => { delete detail.page; }],
+        ["omitted turn cursor", detail => { delete detail.page.nextCursor; }],
+        ["contradictory turn pagination", detail => { detail.page.hasMore = true; }],
+        ["malformed turn cursor", detail => { detail.page.nextCursor = true; detail.page.hasMore = true; }],
+        ["incorrect turn order", detail => { detail.page.order = "oldest_first"; }],
+        ["empty turn history", detail => { detail.turns = []; }],
+        ["missing initial turn ID", detail => { delete detail.turns[0].id; }],
+        ["empty item history", detail => { detail.turns[0].items = []; }],
+        ["malformed item cursor", detail => { detail.turns[0].nextItemCursor = false; }],
+        ["wrong initial item", detail => { detail.turns[0].items[0].name = "other"; }],
+    ]) {
+        changeCompetingDetail = changeDetail;
+        await assertPending(shape);
+    }
     for (const [shape, changeOutput] of [
         ["missing text", output => { delete output.text; }],
         ["non-string text", output => { output.text = {value: output.text}; }],
         ["truncated text", output => { output.truncated = true; }],
+        ["malformed delegation envelope", output => { output.text = "Unreadable assignment"; }],
     ]) {
-        changeCompetingOutput = changeOutput;
-        const result = await dispatch("interrupted");
-        assert.equal(show("interrupted").worker, null, `A competing assignment with ${shape} must keep recovery unbound`);
-        assert.equal(result.blocker, "native_worker_history_unavailable", shape);
-        assert.equal(result.launch, false, shape);
-        assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1);
+        changeCompetingDetail = detail => changeOutput(detail.turns[0].items[0].output);
+        await assertPending(shape);
     }
-    changeCompetingOutput = output => { output.text = output.text.replace("Parser files only", "Other scope"); };
-    assert.equal((await dispatch("interrupted")).worker, second);
-    changeCompetingOutput = undefined;
+    changeCompetingDetail = undefined;
+    for (const [shape, failedReply] of [
+        ["a native read error", {isError: true, content: []}],
+        ["invalid JSON", {content: [{type: "text", text: "{"}]}],
+    ]) {
+        await assertPending(shape, {
+            ...desktop,
+            async mcp__codex_app__read_thread(args) {
+                if (args.threadId === worker) return failedReply;
+                return desktop.mcp__codex_app__read_thread(args);
+            },
+        });
+    }
+    pageCompetingHistory = true;
+    changeCompetingDetail = (detail, cursor) => {
+        if (cursor) detail.thread.id = second;
+    };
+    await assertPending("mismatched chat on an older turn page");
+    changeCompetingDetail = (detail, cursor) => {
+        if (cursor) detail.page = {...detail.page, hasMore: true, nextCursor: cursor};
+    };
+    await assertPending("repeated turn cursor");
+    changeCompetingDetail = undefined;
+    for (const [shape, changeItems] of [
+        ["mismatched chat on an item page", page => { page.threadId = second; }],
+        ["omitted chat on an item page", page => { delete page.threadId; }],
+        ["mismatched turn on an item page", page => { page.turnId = second; }],
+        ["omitted turn on an item page", page => { delete page.turnId; }],
+        ["omitted item page cursor", page => { delete page.nextItemCursor; }],
+        ["repeated item cursor", page => { page.nextItemCursor = "older-items"; }],
+        ["empty item page", page => { page.items = []; }],
+    ]) {
+        changeCompetingItems = changeItems;
+        await assertPending(shape);
+    }
+    changeCompetingItems = undefined;
+    assert.equal((await dispatch("interrupted")).worker, second,
+        "An exact match and a validated different assignment permit unique recovery");
+    pageCompetingHistory = false;
     assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1);
 
     candidates = [];
@@ -213,6 +307,25 @@ async function run(root) {
     const confirmed = {startingState: {branchName: "approved", type: "branch"}, type: "worktree"};
     assert.equal((await dispatch("worktree", worktreeDesktop, {environment: confirmed})).state, "running");
     assert.equal(worktreeLaunches, 1);
+
+    const lostWorktreeReply = {...desktop, async mcp__codex_app__create_thread(args) {
+        assert.deepEqual(args.target, {type: "project", projectId, environment});
+        launches.push(args);
+        throw Error("Fixture lost its native worktree launch reply");
+    }};
+    const worktreeRoute = {environment};
+    const worktreeKey = "worktree-interrupted";
+    assert.equal((await dispatch(worktreeKey, lostWorktreeReply, worktreeRoute)).blocker,
+        "native_launch_failed_or_unconfirmed");
+    competingWorker = "77777777-7777-4777-8777-777777777777";
+    candidates = [candidate({id: competingWorker, cwd: "/fixture/worktree"})];
+    changeCompetingDetail = detail => { detail.thread.cwd = projectPath; };
+    assert.equal((await dispatch(worktreeKey, lostWorktreeReply, worktreeRoute)).blocker,
+        "native_worker_history_unavailable");
+    assert.equal(show(worktreeKey).worker, null);
+    changeCompetingDetail = undefined;
+    assert.equal((await dispatch(worktreeKey, lostWorktreeReply, worktreeRoute)).worker, competingWorker);
+    assert.equal(launches.filter(args => args.title.endsWith(worktreeKey)).length, 1);
 }
 
 const root = mkdtempSync(join(tmpdir(), "codexos-dispatch-worker-"));
