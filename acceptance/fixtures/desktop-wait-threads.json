@@ -1,0 +1,9 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"timedOut\":false,\"polls\":[{\"schemaVersion\":1,\"revision\":1,\"changed\":true,\"thread\":{\"id\":\"11111111-1111-4111-8111-111111111110\",\"hostId\":\"local\",\"status\":{\"type\":\"idle\"}},\"latestTurn\":{\"id\":\"22222222-2222-4222-8222-222222222222\",\"status\":\"completed\",\"error\":null,\"startedAt\":1795724058,\"completedAt\":1795724059,\"durationMs\":1000}}],\"errors\":[]}"
+    }
+  ],
+  "isError": false
+}

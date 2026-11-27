@@ -12,6 +12,7 @@ import dispatch
 import fleet
 import ledger
 import monitor
+import release
 import scheduled
 
 ROOT = Path(__file__).resolve().parent
@@ -83,17 +84,30 @@ def main(argv=None, root=ROOT):
     sub.add_parser("status", help="Check this project's durable state")
     sub.add_parser("briefing", help="Read recent evidence and open work").add_argument(
         "--period", choices=("day", "week"), default="day")
-    for module in (fleet, ledger, monitor, dispatch, scheduled):
+    for module in (fleet, ledger, monitor, dispatch, scheduled, release):
         module.commands(sub)
     args = parser.parse_args(argv)
     if args.command == "init":
         return [record["id"] for record in fleet.bootstrap(root)]
+    if args.command == "release":
+        return release.verify(args)
     bot = select_bot(root, args.bot)
     if args.command in {"mailbox", "create-bot", "fleet-list"}:
         return fleet.run(None, args, root, bot)
     folder = bot / "state"
+    database = folder / "agent.sqlite3"
+    memory_index = args.command == "memory" and args.action == "index"
+    if args.command == "evidence" or memory_index:
+        if (folder.is_symlink() or database.is_symlink()
+                or (database.exists() and not database.is_file())):
+            raise ValueError("expected a local bot state directory and database")
+    if memory_index:
+        if not database.exists():
+            return ledger.memory_index()
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+            return ledger.memory_index(db)
     folder.mkdir(exist_ok=True)
-    with closing(sqlite3.connect(folder / "agent.sqlite3", timeout=5, uri=True)) as db, db:
+    with closing(sqlite3.connect(database, timeout=5, uri=True)) as db, db:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
         db.execute("BEGIN IMMEDIATE")
@@ -136,7 +150,11 @@ def main(argv=None, root=ROOT):
 if __name__ == "__main__":
     try:
         result = main()
-        if result is not None:
+        if isinstance(result, bytes):
+            sys.stdout.buffer.write(result)
+        elif isinstance(result, str):
+            print(result)
+        elif result is not None:
             print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
     except (OSError, ValueError, sqlite3.Error) as exc:
         sys.exit(f"codexos: {exc}")

@@ -15,6 +15,37 @@ function poll(job, status = "completed") {
     };
 }
 
+async function checkObservedTerminalSnapshot() {
+    const fixture = JSON.parse(readFileSync(join(__dirname, "fixtures/desktop-wait-threads.json"), "utf8"));
+    const snapshot = JSON.parse(fixture.content[0].text);
+    const [terminal] = snapshot.polls;
+    const job = {key: "finished", host: terminal.thread.hostId, worker: terminal.thread.id, delivery: null};
+    let result = fixture;
+    const tools = {
+        async exec_command({cmd}) {
+            assert.equal(cmd, "python3 ../../codexos.py heartbeat");
+            return {exit_code: 0, output: JSON.stringify({workers_to_check: [job], workers_to_archive: []})};
+        },
+        async mcp__codex_app__wait_threads(args) {
+            assert.deepEqual(args, {targets: [{threadId: job.worker, hostId: job.host}], timeoutMs: 0});
+            return result;
+        },
+    };
+    assert.deepEqual((await heartbeat(tools)).workers_to_review, [
+        {...job, turn_id: terminal.latestTurn.id, turn_status: "completed"},
+    ]);
+
+    const mismatched = {...terminal, latestTurn: {...terminal.latestTurn, id: {value: terminal.latestTurn.id}}};
+    const unloaded = {...terminal, activityComplete: false,
+        thread: {...terminal.thread, status: {type: "notLoaded"}}};
+    for (const poll of [mismatched, unloaded]) {
+        result = reply({...snapshot, polls: [poll]});
+        const pulse = await heartbeat(tools);
+        assert.deepEqual(pulse.workers_to_review, []);
+        assert.deepEqual(pulse.workers_to_check, [job]);
+    }
+}
+
 async function checkMissedNotification() {
     const jobs = ["finished", "running", "unavailable"].map((key, index) => ({
         key, state: "running", host: index === 0 ? "durable" : "local", delivery: null,
@@ -290,6 +321,7 @@ async function checkActiveWorkerDrift() {
 
 (async () => {
     await checkActiveWorkerDrift();
+    await checkObservedTerminalSnapshot();
     await checkMissedNotification();
     await checkArchiveRecovery();
 })().catch(error => { console.error(error); process.exitCode = 1; });
