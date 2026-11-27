@@ -9,6 +9,7 @@
         !["local", "worktree"].includes(environment?.type))
         throw Error("Supply the dispatch objective, scope, brief and approved Codex project, host and environment");
 
+    const launchRoute = JSON.stringify({projectId, projectPath, hostId, environment});
     const title = "CodexOS worker " + key;
     const prompt = [
         "CodexOS dispatch " + key + ". You are the temporary worker for this assignment.",
@@ -41,15 +42,16 @@
     const [primary, current] = await shell("python3 -c " + quote(context));
     if (!validChat(primary) || current !== primary)
         throw Error("Run worker dispatch in the registered coordinator chat");
-    const request = ["reserve", key, "--objective=" + objective, "--scope=" + scope];
+    const request = ["reserve", key, "--objective=" + objective, "--scope=" + scope, "--launch-route=" + launchRoute];
     const prepared = await cli(...request, "--prepare");
-    if (prepared.worker || prepared.state !== "reserved") return prepared;
+    if (prepared.worker || prepared.state !== "reserved" || prepared.blocker) return prepared;
     if ((prepared.permissions?.status ?? "ready") !== "ready") return {...prepared, blocker: "permission_preflight"};
 
     function pending(record, blocker, details = {}) {
         return {...record, ...details, launch: false, blocker};
     }
 
+    const {environment: approvedEnvironment} = JSON.parse(prepared.launch_route);
     let projects;
     try {
         ({projects} = await native("list_projects", {}));
@@ -59,11 +61,11 @@
         return pending(prepared, "native_project_list_unavailable");
     }
     if (projects.length !== 1 || projects[0].projectId !== projectId ||
-        (environment.type === "worktree" && projects[0].isGitRepository !== true))
+        (approvedEnvironment.type === "worktree" && projects[0].isGitRepository !== true))
         return pending(prepared, "native_project_mismatch");
 
     const matchesChat = chat => chat.kind === "codex" && chat.id !== primary && validChat(chat.id) &&
-        chat.hostId === hostId && (environment.type === "worktree" || chat.cwd === projectPath);
+        chat.hostId === hostId && (approvedEnvironment.type === "worktree" || chat.cwd === projectPath);
     const envelope = "<codex_delegation>\n  <source_thread_id>" + primary +
         "</source_thread_id>\n  <input>" + prompt + "</input>\n</codex_delegation>";
 
@@ -123,14 +125,14 @@
         return pending(prepared, "native_launch_unavailable");
     const claimed = await cli(...request);
     if (!claimed.launch) {
-        if (claimed.worker || claimed.state !== "reserved") return claimed;
+        if (claimed.worker || claimed.state !== "reserved" || claimed.blocker) return claimed;
         if ((claimed.permissions?.status ?? "ready") !== "ready") return pending(claimed, "permission_preflight");
         return recover(claimed);
     }
 
     let worker;
     try {
-        worker = await native("create_thread", {title, prompt, target: {type: "project", projectId, environment}});
+        worker = await native("create_thread", {title, prompt, target: {type: "project", projectId, environment: approvedEnvironment}});
     } catch {
         // A failure can arrive after creation. Preserve the claim for read-only recovery.
         return pending(claimed, "native_launch_failed_or_unconfirmed");

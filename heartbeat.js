@@ -102,12 +102,13 @@
             const [reply] = await native(tools.mcp__codex_app__read_thread, {...args, cursor, turnLimit: 10, itemLimit: 100});
             const detail = JSON.parse(reply);
             if (detail.thread?.id !== threadId || detail.thread.hostId !== hostId ||
-                detail.thread.kind !== "codex" || detail.thread.cwd !== workdir) return;
+                detail.thread.kind !== "codex" || detail.thread.cwd !== workdir)
+                throw Error("Scheduled worker detail differs from native history");
             oldest = detail.turns.at(-1);
             cursor = detail.page?.nextCursor;
             if (!cursor) break;
         }
-        if (cursor || !oldest) return;
+        if (cursor || !oldest) throw Error("Initial scheduled worker turn unavailable");
         let items = oldest.items;
         let itemCursor = oldest.nextItemCursor;
         for (let page = 0; itemCursor && page < 5; page++) {
@@ -116,9 +117,13 @@
             items = detail.items;
             itemCursor = detail.nextItemCursor;
         }
-        const input = itemCursor ? undefined : items?.[0];
-        if (input?.type === "functionCallOutput" && input.namespace === "codex_app" &&
-            input.name === "create_thread" && input.output?.truncated === false) return input.output.text;
+        if (itemCursor || !items?.length) throw Error("Initial scheduled worker item unavailable");
+        const [input] = items;
+        if (input?.type === "functionCallOutput" && input.namespace === "codex_app" && input.name === "create_thread") {
+            if (input.output?.truncated !== false || typeof input.output.text !== "string")
+                throw Error("Initial scheduled worker assignment unavailable");
+            return input.output.text;
+        }
     }
 
     async function recoverWorkers(jobs, project, primary) {
@@ -126,7 +131,8 @@
         const candidates = new Map();
         for (const archived of [false, true]) {
             let cursor;
-            for (let page = 0; page < 5; page++) {
+            const seenCursors = new Set();
+            for (let page = 0; page < 50; page++) {
                 const [reply] = await native(tools.mcp__codex_app__list_threads,
                     {mode: "history", hostId: "local", archived, limit: 50, cursor});
                 const history = JSON.parse(reply);
@@ -137,8 +143,13 @@
                         candidates.set(chat.id, chat);
                 }
                 cursor = history.nextCursor;
-                if (!cursor) break;
+                if (cursor == null) break;
+                if (typeof cursor !== "string" || !cursor || seenCursors.has(cursor))
+                    throw Error("Invalid scheduled worker history cursor");
+                seenCursors.add(cursor);
             }
+            // A match from a partial history cannot establish uniqueness.
+            if (cursor != null) throw Error("Scheduled worker history search incomplete");
         }
         const recovered = [];
         for (const job of jobs) {
@@ -147,10 +158,15 @@
             const expected = "<codex_delegation>\n  <source_thread_id>" + job.chat +
                 "</source_thread_id>\n  <input>" + prompt + "</input>\n</codex_delegation>";
             const matches = [];
-            for (const chat of candidates.values()) {
-                if (chat.id === job.chat || (job.client && chat.clientThreadId && job.client !== chat.clientThreadId) ||
-                    (chat.title !== scheduledTitle(job) && chat.title !== "CodexOS scheduled " + job.id)) continue;
-                if (await initialDelegation(chat.id, job.host) === expected) matches.push(chat.id);
+            try {
+                for (const chat of candidates.values()) {
+                    if (chat.id === job.chat || (job.client && chat.clientThreadId && job.client !== chat.clientThreadId) ||
+                        (chat.title !== scheduledTitle(job) && chat.title !== "CodexOS scheduled " + job.id)) continue;
+                    if (await initialDelegation(chat.id, job.host) === expected) matches.push(chat.id);
+                    if (matches.length > 1) break;
+                }
+            } catch {
+                continue;
             }
             if (matches.length === 1) recovered.push({...job, worker: matches[0]});
         }

@@ -23,6 +23,9 @@ def install(db):
     if "launch_issued" not in columns:
         db.execute("ALTER TABLE dispatches ADD COLUMN launch_issued INTEGER NOT NULL DEFAULT 1")
 
+    if "launch_route" not in columns:
+        db.execute("ALTER TABLE dispatches ADD COLUMN launch_route TEXT")
+
     db.execute("""CREATE TABLE IF NOT EXISTS dispatch_poll (
         key TEXT PRIMARY KEY REFERENCES dispatches(key), turn INTEGER NOT NULL)""")
 
@@ -79,7 +82,7 @@ def observe_checkpoint(db, args, record, stamp):
                     "target": f"Codex worker {args.worker} on {args.host}", "required": True}]
     request = argparse.Namespace(key=handoff_key, reuse=args.key, requirement=plan["correction"],
                                  objective=record["objective"], scope=record["scope"],
-                                 plan=json.dumps(permissions), decisions=None, required=True)
+                                 plan=json.dumps(permissions), decisions=None, required=True, launch_route=None)
     reserve(db, request, stamp)
     db.execute("UPDATE dispatch_checkpoints SET drift=? WHERE key=?", (f"{evidence}: {args.value}", args.key))
     return {"parent": args.key, "key": handoff_key, "status": "drift", "expected": plan["expected"],
@@ -153,6 +156,35 @@ def native_id(raw):
     return raw
 
 
+def launch_route(raw):
+    def valid_text(value):
+        return isinstance(value, str) and bool(value.strip()) and len(value) <= 4096 and "\0" not in value
+
+    try:
+        route = json.loads(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Supply the approved native launch route as JSON") from exc
+    if not isinstance(route, dict) or set(route) != {"projectId", "projectPath", "hostId", "environment"}:
+        raise argparse.ArgumentTypeError("A launch route requires projectId, projectPath, hostId and environment")
+    if not all(valid_text(route[field]) for field in ("projectId", "projectPath", "hostId")):
+        raise argparse.ArgumentTypeError("Launch route identifiers and path must be nonempty text")
+
+    environment = route["environment"]
+    if environment != {"type": "local"}:
+        if (not isinstance(environment, dict) or environment.get("type") != "worktree"
+                or set(environment) - {"type", "startingState"}):
+            raise argparse.ArgumentTypeError("Use a local or worktree environment")
+        if "startingState" in environment:
+            start = environment["startingState"]
+            if start != {"type": "working-tree"} and (
+                    not isinstance(start, dict) or start.get("type") != "branch"
+                    or set(start) - {"type", "branchName", "onMissing"}
+                    or not valid_text(start.get("branchName"))
+                    or start.get("onMissing", "error") not in ("error", "create-branch")):
+                raise argparse.ArgumentTypeError("Use a working-tree or named branch starting state")
+    return json.dumps(route, sort_keys=True, separators=(",", ":"))
+
+
 def commands(sub):
     actions = sub.add_parser("dispatch", help="Coordinate native worker chats").add_subparsers(
         dest="dispatch_action", required=True)
@@ -178,6 +210,8 @@ def commands(sub):
             action.add_argument("--required", action="store_true", help="Require adoption of a reused assignment")
             action.add_argument("--plan", metavar="JSON", help="Permission requests to record for this dispatch")
             action.add_argument("--prepare", action="store_true", help="Record intake without claiming a launch")
+            action.add_argument("--launch-route", type=launch_route, metavar="JSON",
+                                help="Approved native project, path, host and execution environment")
         if name in {"reserve", "permissions"}:
             action.add_argument("--decisions", metavar="JSON", help="Verified operator decisions and references")
         if name == "handoff":
@@ -223,6 +257,8 @@ def reserve(db, args, stamp):
         raise ValueError("Supply --reuse and --requirement together")
     if args.required and not args.reuse:
         raise ValueError("--required applies only to a reused dispatch")
+    if args.reuse and args.launch_route is not None:
+        raise ValueError("A reused dispatch keeps its bound worker")
     existing = addition(db, key)
     if existing:
         if (args.reuse, args.requirement, args.objective, args.scope, args.required) != (
@@ -241,12 +277,16 @@ def reserve(db, args, stamp):
         db.execute("""INSERT INTO dispatch_additions(key,parent,requirement,updated,required)
                    VALUES(?,?,?,?,?)""", (key, args.reuse, args.requirement, stamp, args.required))
         return reserve_permissions(db, args, dict(addition(db, key), launch=False), allow_new=True)
-    db.execute("""INSERT INTO dispatches(key,objective,scope,state,updated,launch_issued)
-        VALUES(?,?,?,'reserved',?,0) ON CONFLICT(key) DO NOTHING""",
-        (key, args.objective, args.scope, stamp))
+    db.execute("""INSERT INTO dispatches(key,objective,scope,state,updated,launch_issued,launch_route)
+        VALUES(?,?,?,'reserved',?,0,?) ON CONFLICT(key) DO NOTHING""",
+        (key, args.objective, args.scope, stamp, args.launch_route))
     record = dict(db.execute("SELECT * FROM dispatches WHERE key=?", (key,)).fetchone())
     if (args.objective, args.scope) != (record["objective"], record["scope"]):
         raise ValueError("Dispatch key already identifies a different objective or scope")
+    if (record["state"] == "reserved" and args.launch_route != record["launch_route"]
+            and (args.launch_route is not None or not args.prepare)):
+        blocker = "native_route_unavailable" if record["launch_route"] is None else "native_route_mismatch"
+        return dict(record, launch=False, blocker=blocker)
     unclaimed = record["state"] == "reserved" and not record["launch_issued"]
     record = reserve_permissions(db, args, record, allow_new=unclaimed)
     launch = unclaimed and not args.prepare and record.get("permissions", {}).get("status", "ready") == "ready"
@@ -370,6 +410,8 @@ def run(db, args, root, bot):
     if action == "bind":
         if not record["launch_issued"]:
             raise ValueError("Claim the dispatch launch with reserve before binding a worker")
+        if record["launch_route"] is not None and args.host != json.loads(record["launch_route"])["hostId"]:
+            raise ValueError("Worker host differs from the approved launch route")
         changes = {"worker": args.thread_id, "host": args.host}
         required = ("reserved",)
         state = "running"

@@ -183,6 +183,7 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     let requestResult;
     let hiddenWorker;
     let conflictingChats = [];
+    let recoveryHistory;
     let denyLaunch = false;
     let nativeLaunchCalls = 0;
     let nativeProject = dispatcher.project;
@@ -226,6 +227,7 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
         async mcp__codex_app__list_threads({mode, hostId: host, archived, cursor}) {
             assert.equal(mode, "history");
             assert.equal(host, hostId);
+            if (recoveryHistory) return reply(recoveryHistory({archived, cursor}));
             if (archived) return reply({threads: []});
             if (!cursor) return reply({threads: [], nextCursor: "next"});
             return reply({threads: [...launches.filter(job => job.worker !== hiddenWorker).map(job => ({
@@ -238,9 +240,11 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
             const job = launches.find(job => job.worker === threadId);
             const other = conflictingChats.find(chat => chat.id === threadId);
             assert.ok(job || other);
+            const input = nativeLaunch(job?.prompt ?? other.prompt, other?.source ?? chatId);
+            if (other?.truncated) input.output.truncated = true;
             return reply({
                 thread: {id: threadId, kind: "codex", cwd: projectDir, hostId},
-                turns: [{items: [nativeLaunch(job?.prompt ?? other.prompt, other?.source ?? chatId)]}],
+                turns: [{items: [input]}],
             });
         },
         async mcp__codex_app__list_archived_threads({hostId: host}) {
@@ -584,8 +588,44 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     const interrupted = launches.at(-1);
     assert.equal(attemptOf(interrupted, 1).worker, null);
     assert.throws(() => runCLI("schedule", "bind-worker", interrupted.occurrence, weekly.worker, weekly.token), /claim changed/i);
+    const interruptedChat = {id: interrupted.worker, title: interrupted.title, kind: "codex", projectId, cwd: projectDir, hostId};
+    conflictingChats = [{...interruptedChat, id: "33333333-3333-4333-8333-333333333333", prompt: interrupted.prompt}];
+    const longHistory = (duplicate, archivedDuplicate = false) => ({archived, cursor}) => {
+        if (archived && !archivedDuplicate) return {threads: []};
+        const page = Number(cursor ?? "1");
+        return {
+            threads: !archived && page === 1 ? [interruptedChat] :
+                page === 6 && duplicate && archived === archivedDuplicate ? conflictingChats : [],
+            nextCursor: page < 6 ? String(page + 1) : null,
+        };
+    };
+    for (const archived of [false, true]) {
+        recoveryHistory = longHistory(true, archived);
+        await pulse();
+        assert.equal(attemptOf(interrupted, 1).worker, null,
+            "A competing worker on page six keeps recovery unbound");
+    }
+    conflictingChats[0].truncated = true;
+    recoveryHistory = longHistory(true);
     await pulse();
-    assert.equal(attemptOf(interrupted, 1).worker, interrupted.worker);
+    assert.equal(attemptOf(interrupted, 1).worker, null, "A truncated competing assignment cannot establish uniqueness");
+    recoveryHistory = ({archived}) => ({threads: archived ? [] : [interruptedChat], nextCursor: "repeated"});
+    await pulse();
+    assert.equal(attemptOf(interrupted, 1).worker, null, "A cursor loop cannot establish uniqueness");
+    let pages = 0;
+    recoveryHistory = ({cursor}) => {
+        pages++;
+        return {threads: cursor ? [] : [interruptedChat], nextCursor: String(pages)};
+    };
+    await pulse();
+    assert.equal(pages, 50, "A heartbeat bounds the history scan");
+    assert.equal(attemptOf(interrupted, 1).worker, null, "The page limit cannot establish uniqueness");
+    recoveryHistory = longHistory(false);
+    await pulse();
+    assert.equal(attemptOf(interrupted, 1).worker, interrupted.worker,
+        "Recovery binds after exhausting the native history and establishing uniqueness");
+    recoveryHistory = undefined;
+    conflictingChats = [];
     assert.equal(launches.length, 5);
     assert.equal(start(interrupted).start, true);
     ends.set(interrupted.worker, "failed");

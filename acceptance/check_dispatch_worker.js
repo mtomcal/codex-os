@@ -86,11 +86,36 @@ async function run(root) {
     assert.equal(launches.length, 0);
     currentChat = coordinator;
 
+    const unavailable = {...desktop, mcp__codex_app__create_thread: undefined};
+    assert.equal((await dispatch("route-drift", unavailable)).blocker, "native_launch_unavailable");
+    const replacement = {projectId: "other-parser-project", projectPath: "/fixture/other-parser", hostId};
+    let replacementLaunches = 0;
+    const moved = {
+        ...desktop,
+        async mcp__codex_app__list_projects() {
+            return reply({projects: [...fixture.projects.projects, {
+                projectKind: "local", projectId: replacement.projectId, path: replacement.projectPath, hostId,
+            }]});
+        },
+        async mcp__codex_app__create_thread() {
+            replacementLaunches++;
+            return reply({threadId: second, hostId});
+        },
+    };
+    const replacementResult = await dispatch("route-drift", moved, replacement);
+    assert.equal(show("route-drift").worker, null, "A resumed reservation must keep its approved project");
+    assert.equal(replacementResult.blocker, "native_route_mismatch");
+    assert.equal(replacementLaunches, 0);
+    const originalRoute = {projectId, projectPath, hostId, environment: {type: "local"}};
+    assert.deepEqual(JSON.parse(show("route-drift").launch_route), originalRoute);
+
     const pending = await dispatch("ready", {...desktop, mcp__codex_app__create_thread: undefined});
     assert.equal(pending.blocker, "native_launch_unavailable");
     assert.equal(show("ready").launch_issued, 0);
     assert.equal(launches.length, 0);
-    assert.equal((await dispatch("ready", desktop, {projectId: "wrong"})).blocker, "native_project_mismatch");
+    assert.equal((await dispatch("ready", desktop, {projectId: "wrong"})).blocker, "native_route_mismatch");
+    const noProject = {...desktop, async mcp__codex_app__list_projects() { return reply({projects: []}); }};
+    assert.equal((await dispatch("ready", noProject)).blocker, "native_project_mismatch");
     assert.equal(launches.length, 0);
 
     assert.equal((await dispatch("ready")).worker, worker);
@@ -101,8 +126,23 @@ async function run(root) {
     assert.deepEqual([revision.parent, revision.worker, revision.host, revision.launch], ["ready", worker, hostId, false]);
     assert.equal(launches.length, 1);
 
+    const routeOption = "--launch-route=" + JSON.stringify(originalRoute);
+    const routeOptions = ["--objective", objective, "--scope", scope];
+    const offline = {exec_command: desktop.exec_command};
+    for (const change of [{projectPath: replacement.projectPath}, {hostId: "remote"}, {environment: {type: "worktree"}}]) {
+        assert.equal((await dispatch("route-drift", offline, change)).blocker, "native_route_mismatch");
+    }
+    assert.equal(ledger("reserve", "route-drift", ...routeOptions).launch, false);
+    for (const prepare of [[], ["--prepare"]]) {
+        const key = prepare.length ? "legacy-pending" : "legacy-claimed";
+        ledger("reserve", key, ...routeOptions, ...prepare);
+        assert.equal((await dispatch(key, offline)).blocker, "native_route_unavailable");
+        assert.equal(show(key).worker, null);
+        assert.equal(show(key).launch_issued, prepare.length ? 0 : 1);
+    }
+
     const plan = JSON.stringify([{id: "test", action: "Run check", target: "Parser project", required: true}]);
-    ledger("reserve", "preflight", "--objective", objective, "--scope", scope, "--prepare", "--plan", plan);
+    ledger("reserve", "preflight", ...routeOptions, routeOption, "--prepare", "--plan", plan);
     assert.equal((await dispatch("preflight")).blocker, "permission_preflight");
     assert.equal(show("preflight").launch_issued, 0);
     assert.equal(launches.length, 1);
@@ -119,6 +159,8 @@ async function run(root) {
 
     const candidate = overrides => ({...fixture.history.threads[0], title: launches.at(-1).title, ...overrides});
     assert.equal((await dispatch("interrupted")).blocker, "native_launch_failed_or_unconfirmed");
+    assert.equal((await dispatch("interrupted", offline, replacement)).blocker, "native_route_mismatch");
+    assert.equal(show("interrupted").worker, null);
     candidates = [candidate({id: second, projectId: "wrong"}), candidate({id: coordinator})];
     assert.equal((await dispatch("interrupted")).blocker, "native_launch_unconfirmed");
     candidates = [candidate({id: second})];
@@ -142,6 +184,20 @@ async function run(root) {
     candidates = [candidate({id: queuedWorker})];
     assert.equal((await dispatch("queued")).worker, queuedWorker);
     assert.equal(launches.filter(args => args.title.endsWith("queued")).length, 1);
+
+    const environment = {type: "worktree", startingState: {type: "branch", branchName: "approved"}};
+    assert.equal((await dispatch("worktree", unavailable, {environment})).blocker, "native_launch_unavailable");
+    const changedBranch = {type: "worktree", startingState: {type: "branch", branchName: "other"}};
+    assert.equal((await dispatch("worktree", offline, {environment: changedBranch})).blocker, "native_route_mismatch");
+    let worktreeLaunches = 0;
+    const worktreeDesktop = {...desktop, async mcp__codex_app__create_thread({target}) {
+        assert.deepEqual(target, {type: "project", projectId, environment});
+        worktreeLaunches++;
+        return reply({threadId: "66666666-6666-4666-8666-666666666666", hostId});
+    }};
+    const confirmed = {startingState: {branchName: "approved", type: "branch"}, type: "worktree"};
+    assert.equal((await dispatch("worktree", worktreeDesktop, {environment: confirmed})).state, "running");
+    assert.equal(worktreeLaunches, 1);
 }
 
 const root = mkdtempSync(join(tmpdir(), "codexos-dispatch-worker-"));

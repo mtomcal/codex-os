@@ -6,7 +6,7 @@ The primary chat owns intake, coordination, review, delivery, and cleanup. It an
 
 1. Capture the objective, allowed project and files, work limits, acceptance criteria, and delivery location. Preserve the user's original scope and include authorization for any writes in the worker brief. Assign a stable key and check it with `dispatch show KEY` when recovering intake.
 2. Run `python3 ../../codexos.py dispatch list --active`. If a bound worker clearly covers the addition, confirm its turn is active on the recorded host and follow [Reuse a bound worker](#reuse-a-bound-worker). Use a separate dispatch for independent or out-of-scope work.
-3. Complete [permission preflight](#permission-preflight). Resolve the approved project using the native project list. Use a worktree environment only when the user requested it. For workers sharing a checkout, name any predecessor in the brief and tell the worker to wait for it before writing. Tell the worker where to preserve evidence and when to stop.
+3. Resolve the approved project using the native project list. Complete [permission preflight](#permission-preflight). Use a worktree environment only when the user requested it. For workers sharing a checkout, name any predecessor in the brief and tell the worker to wait for it before writing. Tell the worker where to preserve evidence and when to stop.
 4. In desktop code mode, read and run the checked-in adapter from the coordinator's bot directory. Supply the same inputs on recovery.
 
    ```js
@@ -26,12 +26,12 @@ The primary chat owns intake, coordination, review, delivery, and cleanup. It an
 
 5. If the result includes a bound worker and host, acknowledge the dispatch in the primary chat and end the intake turn. If the result includes a blocker, tell the operator which native step is pending and end the intake turn.
 
-The adapter prepares the ledger record, verifies the exact native project and host, and claims the launch once before calling `create_thread`. It binds a returned chat ID with the recorded host. A queued response stays pending until native history shows the chat ID. On resume after a claim, the adapter only searches native history and binds a unique matching chat. Recovery checks the project, host, and original native dispatch prompt. If native absence is confirmed, record the evidence with `dispatch abandon KEY --evidence TEXT` and reconcile cleanup. Any authorized new attempt uses a new key. An uncertain or ambiguous launch stays open for review.
+The adapter records the approved project ID, path, host, and execution environment in the first reservation. On resume, a changed route or a legacy reservation with no recorded route stays pending. The adapter verifies the native project and claims the launch once before calling `create_thread`. It binds a returned chat ID with the recorded host. A queued response stays pending until native history shows the chat ID. On resume after a claim, the adapter only searches native history and binds a unique matching chat. Recovery checks the project, host, and original native dispatch prompt. If native absence is confirmed, record the evidence with `dispatch abandon KEY --evidence TEXT` and reconcile cleanup. Any authorized new attempt uses a new key. An uncertain or ambiguous launch stays open for review.
 
 ## Permission preflight
 
 1. Inventory the foreseeable actions that need permission. Capture each action, its exact target or data scope, and whether it is required for the work. Check the original human instruction or native grant for each existing approval against the actual action, scope and destination. A prior denial ends that path. For completion messaging, use the registered primary chat and the payload described below. Mark it optional when heartbeat delivery is sufficient.
-2. With a nonempty plan, first run the same dispatch reservation with `--prepare --plan JSON`. For an existing workload, run `workload permissions ID --plan JSON` before starting or resuming it. Reused worker reservations accept the same plan. The plan is a JSON array. Use stable IDs.
+2. With a nonempty plan, run the dispatch reservation with `--prepare --plan JSON`. For a new native worker, include `--launch-route JSON` with `projectId`, `projectPath`, `hostId`, and `environment`. Use the same values for the desktop adapter. For an existing workload, run `workload permissions ID --plan JSON` before starting or resuming it. Reused worker reservations accept the same plan. The plan is a JSON array. Use stable IDs.
 
    ```json
    [
