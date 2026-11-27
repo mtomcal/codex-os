@@ -73,8 +73,29 @@ def verify_artifact(folder, kind, entry, head, tree):
         raise ValueError(f"{name} artifact must record a passing {kind} result")
     if artifact.get("head") != head:
         raise ValueError(f"{name} artifact names a different head")
-    if kind == "acceptance" and artifact.get("tree") != tree:
+    if kind == "acceptance":
+        verify_acceptance(artifact, head, tree)
+    elif any(not isinstance(artifact.get(field), str) or not artifact[field].strip()
+             for field in ("source", "observation")):
+        raise ValueError(f"{name} attestation must name its source and observation")
+
+
+def verify_acceptance(artifact, head, tree):
+    from acceptance.run import standard_jobs
+
+    if artifact.get("tree") != tree:
         raise ValueError("Acceptance artifact names a different tree")
+    expected = {"head": head, "tree": tree, "clean": True}
+    for checkpoint in ("start", "end"):
+        observed = artifact.get(checkpoint)
+        if observed != expected or observed["clean"] is not True:
+            raise ValueError("Acceptance runner must start and finish on the same clean receipt head and tree")
+    checks = artifact.get("checks")
+    required = [name for name, _ in standard_jobs(Path())]
+    if (not isinstance(checks, list) or any(not isinstance(check, dict)
+            or type(check.get("exit")) is not int or check["exit"] != 0 for check in checks)
+            or [check.get("check") for check in checks[:len(required)]] != required):
+        raise ValueError("Acceptance artifact must show all required checks passed")
 
 
 def verify(args):
