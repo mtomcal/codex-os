@@ -51,6 +51,8 @@ The factory saves the choices and approval reference in `bot.json`. Generated in
 
 The delegated heartbeat is the bot's only native schedule. Use `mode: "scheduled"` for calendar work and `mode: "event"` for recorded events. A scheduled routine is due at the start of its local window and each `every_minutes` interval before the end. `24:00` is valid for the end of a full day. For a Friday 5 p.m. run, start that routine at `17:00` and keep the heartbeat window open through the relevant tick. Both windows use the approved IANA time zone. Catch-up runs still need an open heartbeat window. The default tick is 15 minutes and the default catch-up is 24 hours. The approved scope includes one level of delegation in the registered bot project.
 
+For an end-of-day routine, add `"gate": "daily-briefing"` to its scheduled `timing` with `"every_minutes": 1440`. A due slot stays quiet until the local ledger has new work, findings or an eligible human decision due. The dispatcher can pick up new input later the same day. At local midnight an untouched daily slot expires, including a claim that has yet to reach the native service. A worker already requested can still be recovered. See [daily briefing delivery](ledger.md#deliver-a-daily-briefing) for how the primary records which inputs were covered.
+
 From the Chief of Staff project, run the desktop check in the Codex code-mode tool. Use the Chief's absolute directory for `workdir` if the chat runs elsewhere.
 
 ```js
@@ -76,7 +78,7 @@ Record `first_turn` and `first_review` after the approved automation completes a
 
 From an authorized producer or operator workflow, record event readiness using `python3 ../../codexos.py schedule ready ROUTINE EVENT --evidence REFERENCE`. Reuse the event ID on retry. A revised approval carries unclaimed events forward for routines still configured for events. The same event ID preserves the outcome of any previous execution attempt.
 
-The dispatcher claims at most three workers and allows one active occurrence per routine. It checks native history for queued or interrupted launches before acting on an overdue claim. A confirmed interruption before work starts can trigger an automatic retry. An unconfirmed launch or uncertain effect requires review.
+The dispatcher launches each occurrence through the native Codex chat tool in the registered project and host. It claims at most three workers and allows one active occurrence per routine. It checks native history for queued or interrupted launches before acting on an overdue claim. A confirmed interruption before work starts can trigger an automatic retry. If a native launch fails or returns an unexpected response, the tick lists the affected occurrence under `worker_launches_pending`. The claim stays open for native history recovery. An unconfirmed launch or uncertain effect requires review.
 
 Read pending occurrence and attempt updates with `state snapshot --chat CHAT_ID`. For each continuation, pass the preceding page's `next_after` to `--after` and its `revision` to `--revision`. Start a new snapshot if the revision changes. After the last page, acknowledge the revision with `state ack --chat CHAT_ID --revision REVISION`.
 

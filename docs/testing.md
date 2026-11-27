@@ -16,4 +16,6 @@ The desktop provisioning check uses Node, fake native Codex tools, and a disposa
 
 The heartbeat replay includes a sanitized projection of a read-only desktop `wait_threads` response observed on November 26, 2026. It retains the tool envelope and the status and turn fields used by the adapter. The live idle response had a string turn ID and a numeric completion time. A separate archived worker returned `notLoaded` with incomplete activity. The replay exercises the checked-in heartbeat with fixture inputs, including a malformed turn ID and the unavailable archived status.
 
+The worker dispatch replay drives `dispatch-worker.js` and the real dispatch ledger. Its fixture retains the response structure observed in desktop `list_projects`, `list_threads`, and `read_thread` on November 26, 2026. The native worker history contained a `codex_app` `create_thread` output with a delegation envelope. The replay replaces identifiers, paths, and prompt text. It covers native binding and reuse, pending or denied launch, lost replies, mismatched hosts, and conflicting recovery candidates.
+
 For the acceptance evidence used in publication, see [verify a published pull request](release.md).

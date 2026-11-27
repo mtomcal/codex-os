@@ -4,6 +4,8 @@ const {execFile, execFileSync} = require("node:child_process");
 const {promisify} = require("node:util");
 const {existsSync, readFileSync, writeFileSync, unlinkSync} = require("node:fs");
 const {join} = require("node:path");
+const recoveryFixture = require("./fixtures/desktop-worker-history.json");
+const {historyCases, turnCases, itemCases} = require("./fixtures/worker-recovery-cases.js");
 const desktopHeartbeat = eval(readFileSync(join(__dirname, "../heartbeat.js"), "utf8"));
 const provisionBot = eval(readFileSync(join(__dirname, "../provision-bot.js"), "utf8"));
 const [, , fleet, python] = process.argv;
@@ -183,7 +185,10 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     let requestResult;
     let hiddenWorker;
     let conflictingChats = [];
+    let recoveryHistory;
+    let recoveryDetail;
     let denyLaunch = false;
+    let nativeLaunchCalls = 0;
     let nativeProject = dispatcher.project;
     const desktop = {
         async exec_command({cmd, workdir}) {
@@ -208,6 +213,7 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
         async mcp__codex_app__list_projects() { return reply({projects: [nativeProject]}); },
         async mcp__codex_app__create_thread({target, title, prompt}) {
             assert.deepEqual(target, {type: "project", projectId, environment: {type: "local"}});
+            nativeLaunchCalls++;
             if (denyLaunch) return {isError: true, content: []};
             const [, occurrence, token] = prompt.match(/schedule start ([a-f0-9]{32}) ([a-f0-9]{32})/);
             assert.match(title, new RegExp(occurrence));
@@ -219,27 +225,33 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
                 hiddenWorker = worker;
                 return reply({clientThreadId: client});
             }
-            return reply({threadId: worker, hostId});
+            const ready = reply({threadId: worker, hostId});
+            if (launchMode === "ambiguous") ready.content.push(...reply({threadId: sourceChatId, hostId}).content);
+            return ready;
         },
         async mcp__codex_app__list_threads({mode, hostId: host, archived, cursor}) {
             assert.equal(mode, "history");
             assert.equal(host, hostId);
-            if (archived) return reply({threads: []});
+            if (recoveryHistory) return reply(recoveryHistory({archived, cursor}));
+            if (archived) return reply({threads: [], nextCursor: null});
             if (!cursor) return reply({threads: [], nextCursor: "next"});
             return reply({threads: [...launches.filter(job => job.worker !== hiddenWorker).map(job => ({
                 id: job.worker, title: job.title, kind: "codex", projectId, cwd: projectDir, hostId,
-            })), ...conflictingChats]});
+            })), ...conflictingChats], nextCursor: null});
         },
-        async mcp__codex_app__read_thread({threadId, hostId: host, includeOutputs}) {
+        async mcp__codex_app__read_thread({threadId, hostId: host, includeOutputs, cursor, itemCursor}) {
             assert.equal(host, hostId);
             assert.equal(includeOutputs, true);
             const job = launches.find(job => job.worker === threadId);
             const other = conflictingChats.find(chat => chat.id === threadId);
             assert.ok(job || other);
-            return reply({
-                thread: {id: threadId, kind: "codex", cwd: projectDir, hostId},
-                turns: [{items: [nativeLaunch(job?.prompt ?? other.prompt, other?.source ?? chatId)]}],
-            });
+            const detail = structuredClone(recoveryFixture.detail);
+            Object.assign(detail.thread, {id: threadId, title: job?.title ?? other.title, cwd: projectDir, hostId});
+            const [turn] = detail.turns;
+            const [input] = turn.items;
+            Object.assign(input, nativeLaunch(job?.prompt ?? other.prompt, other?.source ?? chatId));
+            if (other?.truncated) input.output.truncated = true;
+            return reply(recoveryDetail?.({threadId, cursor, itemCursor, detail}) ?? detail);
         },
         async mcp__codex_app__list_archived_threads({hostId: host}) {
             assert.equal(host, hostId);
@@ -520,7 +532,14 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     runCLI("schedule", "review", retried.occurrence, "--revision", String(reviewState.revision),
         "--decision", "cancel", "--evidence", "verified failed worker");
     advance("2026-11-30T23:30:00Z");
+    const callsBeforeDenial = nativeLaunchCalls;
+    const blocked = await pulse();
+    assert.equal(blocked?.worker_launches_pending?.length, 2);
+    assert.ok(blocked.worker_launches_pending.includes(deniedEvent));
+    assert.equal(runCLI("schedule", "attempts", deniedEvent)[0].worker, null);
+    assert.equal(nativeLaunchCalls, callsBeforeDenial + 2);
     assert.equal(await pulse(), null);
+    assert.equal(nativeLaunchCalls, callsBeforeDenial + 2);
     advance("2026-12-01T00:31:00Z");
     const failure = await pulse();
     assert.equal(failure.occurrences_to_review.length, 2);
@@ -568,15 +587,117 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     assert.equal(finish(queued).state, "done");
     assert.equal(launches.length, 4);
 
-    launchMode = "ready";
+    launchMode = "ambiguous";
     ready("interrupted-launch");
-    failedCommand = "schedule bind-worker";
-    await assert.rejects(pulse, /Fixture transient CLI failure/);
+    const pendingLaunch = await pulse();
     const interrupted = launches.at(-1);
+    assert.deepEqual(pendingLaunch, {worker_launches_pending: [interrupted.occurrence]});
+    launchMode = "ready";
     assert.equal(attemptOf(interrupted, 1).worker, null);
     assert.throws(() => runCLI("schedule", "bind-worker", interrupted.occurrence, weekly.worker, weekly.token), /claim changed/i);
+    const interruptedChat = {id: interrupted.worker, title: interrupted.title, kind: "codex", projectId, cwd: projectDir, hostId};
+    conflictingChats = [{...interruptedChat, id: "33333333-3333-4333-8333-333333333333", prompt: interrupted.prompt}];
+    const longHistory = (duplicate, archivedDuplicate = false) => ({archived, cursor}) => {
+        if (archived && !archivedDuplicate) return {threads: [], nextCursor: null};
+        const page = Number(cursor ?? "1");
+        return {
+            threads: !archived && page === 1 ? [interruptedChat] :
+                page === 6 && duplicate && archived === archivedDuplicate ? conflictingChats : [],
+            nextCursor: page < 6 ? String(page + 1) : null,
+        };
+    };
+    for (const archived of [false, true]) {
+        recoveryHistory = longHistory(true, archived);
+        await pulse();
+        assert.equal(attemptOf(interrupted, 1).worker, null,
+            "A competing worker on page six keeps recovery unbound");
+    }
+    conflictingChats[0].truncated = true;
+    recoveryHistory = longHistory(true);
     await pulse();
-    assert.equal(attemptOf(interrupted, 1).worker, interrupted.worker);
+    assert.equal(attemptOf(interrupted, 1).worker, null, "A truncated competing assignment cannot establish uniqueness");
+    recoveryHistory = ({archived}) => ({threads: archived ? [] : [interruptedChat], nextCursor: "repeated"});
+    await pulse();
+    assert.equal(attemptOf(interrupted, 1).worker, null, "A cursor loop cannot establish uniqueness");
+    let pages = 0;
+    const creates = nativeLaunchCalls;
+    async function assertRecoveryPending(shape) {
+        await pulse();
+        assert.equal(attemptOf(interrupted, 1).worker, null, shape);
+        assert.equal(nativeLaunchCalls, creates, shape);
+    }
+    const competitor = conflictingChats[0];
+    competitor.truncated = false;
+    competitor.prompt = weekly.prompt;
+    for (const [shape, changePage] of historyCases) {
+        recoveryHistory = ({archived}) => {
+            const page = {threads: archived ? [] : [interruptedChat, {...conflictingChats[0]}], nextCursor: null};
+            if (!archived) changePage(page);
+            return page;
+        };
+        await assertRecoveryPending(shape);
+    }
+    competitor.prompt = interrupted.prompt;
+    recoveryHistory = ({archived}) => ({
+        threads: archived ? [{...competitor, projectId: null}] : [interruptedChat], nextCursor: null,
+    });
+    await assertRecoveryPending("unknown project for an exact archived assignment");
+    competitor.prompt = weekly.prompt;
+    for (const [shape, changeDetail] of turnCases) {
+        recoveryDetail = ({threadId, detail}) => {
+            if (threadId === competitor.id) changeDetail(detail);
+            return detail;
+        };
+        await assertRecoveryPending(shape);
+    }
+    const itemContinuation = changePage => ({threadId, detail, cursor, itemCursor}) => {
+        if (threadId !== competitor.id) return detail;
+        const [turn] = detail.turns;
+        if (itemCursor) {
+            assert.equal(itemCursor, "older-items");
+            const page = {...recoveryFixture.itemPage, threadId, turnId: turn.id, items: turn.items};
+            changePage?.(page);
+            return page;
+        }
+        turn.items = [{id: "newer-item", type: "agentMessage"}];
+        turn.nextItemCursor = "older-items";
+        if (!cursor) {
+            turn.id = "newer-turn";
+            detail.page = {...detail.page, nextCursor: "older-turn", hasMore: true};
+        }
+        return detail;
+    };
+    // The foreign continuation contains the only exact assignment in this view.
+    competitor.prompt = interrupted.prompt;
+    recoveryHistory = ({archived}) => ({threads: archived ? [] : [competitor], nextCursor: null});
+    recoveryDetail = itemContinuation(itemCases[0][1]);
+    await assertRecoveryPending("a foreign page cannot establish a match");
+    recoveryHistory = ({archived}) => ({
+        threads: archived ? [{...competitor, projectId: null}] : [interruptedChat], nextCursor: null,
+    });
+    competitor.prompt = weekly.prompt;
+    for (const [shape, changePage] of itemCases) {
+        recoveryDetail = itemContinuation(changePage);
+        await assertRecoveryPending(shape);
+    }
+    recoveryDetail = undefined;
+    recoveryHistory = ({cursor}) => {
+        pages++;
+        return {threads: cursor ? [] : [interruptedChat], nextCursor: String(pages)};
+    };
+    await pulse();
+    assert.equal(pages, 50, "A heartbeat bounds the history scan");
+    assert.equal(attemptOf(interrupted, 1).worker, null, "The page limit cannot establish uniqueness");
+    recoveryHistory = ({archived, cursor}) => archived
+        ? {threads: [{...competitor, projectId: null}], nextCursor: null}
+        : longHistory(false)({archived, cursor});
+    recoveryDetail = itemContinuation();
+    await pulse();
+    recoveryDetail = undefined;
+    assert.equal(attemptOf(interrupted, 1).worker, interrupted.worker,
+        "Recovery binds after exhausting the native history and establishing uniqueness");
+    recoveryHistory = undefined;
+    conflictingChats = [];
     assert.equal(launches.length, 5);
     assert.equal(start(interrupted).start, true);
     ends.set(interrupted.worker, "failed");

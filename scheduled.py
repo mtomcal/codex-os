@@ -6,6 +6,7 @@ import re
 import secrets
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import briefing_gate
 import ledger
 
 
@@ -58,12 +59,17 @@ def plan_config(value):
 
 
 def timing(value):
-    if not isinstance(value, dict) or value.keys() != {"window", "every_minutes"}:
+    if not isinstance(value, dict) or value.keys() - {"window", "every_minutes", "gate"}:
         raise ValueError("Scheduled work needs a window and every_minutes")
-    cadence = value["every_minutes"]
+    cadence = value.get("every_minutes")
     if type(cadence) is not int or not 1 <= cadence <= 1440:
         raise ValueError("Routine cadence must be between 1 and 1440 minutes")
-    return {"window": window(value["window"]), "every_minutes": cadence}
+    result = {"window": window(value.get("window")), "every_minutes": cadence}
+    if "gate" in value:
+        if value["gate"] != "daily-briefing" or cadence != 1440:
+            raise ValueError("The daily-briefing gate requires a daily scheduled routine")
+        result["gate"] = value["gate"]
+    return result
 
 
 def install(db):
@@ -335,14 +341,35 @@ def calendar_cutoff(config, binding, now):
     return max(binding["approved_at"], now - config["catch_up_hours"] * 3600)
 
 
+def briefing_routines(config):
+    return [routine["id"] for routine in config["routines"]
+            if routine.get("timing", {}).get("gate") == "daily-briefing"]
+
+
+def local_midnight(zone, now):
+    day = datetime.fromtimestamp(now, zone).date()
+    return datetime(day.year, day.month, day.day, tzinfo=zone).timestamp()
+
+
 def expire_calendar_work(db, config, binding, now, occurrence=None):
+    lower = calendar_cutoff(config, binding, now)
+    gated = briefing_routines(config)
+    midnight = local_midnight(ZoneInfo(config["timezone"]), now) if gated else lower
     return db.execute("""UPDATE schedule_occurrences SET state='expired',changed=?
-        WHERE plan=? AND event IS NULL AND due<? AND (? IS NULL OR id=?)
+        WHERE plan=? AND event IS NULL AND (? IS NULL OR id=?)
+        AND (due<? OR (due<? AND routine IN (SELECT value FROM json_each(?))))
         AND (state='ready' OR (state='launching' AND EXISTS (
             SELECT 1 FROM schedule_attempts a
             WHERE a.id=schedule_occurrences.id AND a.attempt=schedule_occurrences.attempt
             AND a.launch_requested IS NULL)))""",
-        (now, config["revision"], calendar_cutoff(config, binding, now), occurrence, occurrence)).rowcount
+        (now, config["revision"], occurrence, occurrence, lower, midnight, json.dumps(gated))).rowcount
+
+
+def defer_quiet_briefing(db, now, occurrence):
+    return db.execute("""UPDATE schedule_occurrences SET state='ready',token=NULL,changed=?
+        WHERE id=? AND state='launching' AND EXISTS (
+            SELECT 1 FROM schedule_attempts WHERE id=? AND attempt=schedule_occurrences.attempt
+            AND launch_requested IS NULL)""", (now, occurrence, occurrence)).rowcount
 
 
 def tick(db, config, binding, now):
@@ -353,11 +380,25 @@ def tick(db, config, binding, now):
     db.execute("""UPDATE schedule_occurrences SET state='expired',changed=?
         WHERE plan<>? AND state='ready'""", (now, revision))
     expire_calendar_work(db, config, binding, now)
+    gated = briefing_routines(config)
+    briefing_ready = False
+    if gated:
+        today = local_midnight(zone, now)
+        briefing_gate.install(db)
+        briefing_ready = any(briefing_gate.pending(db, now, limit=1))
+        if not briefing_ready:
+            for row in db.execute("""SELECT id FROM schedule_occurrences WHERE plan=?
+                AND state='launching' AND routine IN (SELECT value FROM json_each(?))""",
+                                  (revision, json.dumps(gated))).fetchall():
+                defer_quiet_briefing(db, now, row["id"])
     for routine in config["routines"]:
         if routine["mode"] == "scheduled":
+            needs_briefing = routine["id"] in gated
+            if needs_briefing and not briefing_ready:
+                continue
             ready = db.execute("""SELECT count(*) FROM schedule_occurrences
                 WHERE plan=? AND state='ready' AND routine=?""", (revision, routine["id"])).fetchone()[0]
-            for due in slots(routine["timing"], zone, lower, now):
+            for due in slots(routine["timing"], zone, max(lower, today) if needs_briefing else lower, now):
                 if ready >= LIMIT:
                     break
                 if enqueue(db, revision, routine["id"], due, now)[1]:
@@ -385,9 +426,10 @@ def tick(db, config, binding, now):
         for row in db.execute("""SELECT id FROM (
             SELECT id,routine,due,row_number() OVER (PARTITION BY routine ORDER BY due,id) AS position
             FROM schedule_occurrences AS ready WHERE plan=? AND state='ready' AND due<=?
+            AND routine NOT IN (SELECT value FROM json_each(?))
             AND NOT EXISTS (SELECT 1 FROM schedule_occurrences AS other WHERE other.routine=ready.routine
                             AND other.state IN ('launching','started','review'))
-            ) WHERE position=1 ORDER BY due,id LIMIT ?""", (revision, now, max(0, LIMIT - busy))).fetchall():
+            ) WHERE position=1 ORDER BY due,id LIMIT ?""", (revision, now, json.dumps([] if briefing_ready else gated), max(0, LIMIT - busy))).fetchall():
             token = secrets.token_hex(16)
             db.execute("""UPDATE schedule_occurrences SET token=?,state='launching',
                        attempt=attempt+1,changed=? WHERE id=?""", (token, now, row["id"]))
@@ -458,12 +500,20 @@ def change_occurrence(db, args, config, binding, now):
     if old_plan and action not in {"bind-worker", "queued", "launch-overdue", "review", "finish"}:
         raise ValueError("Occurrence is outside the active heartbeat plan")
     if hasattr(args, "token") and (not ID.fullmatch(args.token) or args.token != row["token"]):
+        if action == "request-worker" and db.execute("""SELECT 1 FROM schedule_attempts
+            WHERE id=? AND token=? AND launch_requested IS NULL""", (row["id"], args.token)).fetchone():
+            return {"launch": False}
         raise ValueError("Occurrence claim changed")
     # A tick's claim can age out before the desktop reaches the native request.
     if action in {"request-worker", "start"} and expire_calendar_work(db, config, binding, now, row["id"]):
         return {"launch" if action == "request-worker" else "start": False}
     state, worker, receipt = row["state"], row["worker"], row["receipt"]
     if action == "request-worker":
+        if row["routine"] in briefing_routines(config):
+            briefing_gate.install(db)
+            if not any(briefing_gate.pending(db, now, limit=1)):
+                defer_quiet_briefing(db, now, row["id"])
+                return {"launch": False}
         requested = db.execute("""UPDATE schedule_attempts SET launch_requested=?
             WHERE id=? AND attempt=? AND launch_requested IS NULL AND ?='launching'""",
             (now, args.id, row["attempt"], state))

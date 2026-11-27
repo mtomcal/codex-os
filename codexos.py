@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 
+import briefing_gate
 import dispatch
 import fleet
 import ledger
@@ -82,8 +83,11 @@ def main(argv=None, root=ROOT):
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init", help="Prepare proposed projects and shared directories")
     sub.add_parser("status", help="Check this project's durable state")
-    sub.add_parser("briefing", help="Read recent evidence and open work").add_argument(
-        "--period", choices=("day", "week"), default="day")
+    report = sub.add_parser("briefing", help="Read recent evidence and open work")
+    report.add_argument("--period", choices=("day", "week"), default="day")
+    delivery = report.add_mutually_exclusive_group()
+    delivery.add_argument("--pending", action="store_true", help="Stage new work, findings and due decisions for delivery")
+    delivery.add_argument("--delivered", metavar="TOKEN", help="Acknowledge the staged daily briefing after delivery")
     for module in (fleet, ledger, monitor, dispatch, scheduled, release):
         module.commands(sub)
     args = parser.parse_args(argv)
@@ -126,6 +130,13 @@ def main(argv=None, root=ROOT):
         if args.command == "provision-bot":
             return fleet.provision(db, args, root, bot)
         if args.command == "briefing":
+            if args.pending or args.delivered is not None:
+                if args.period != "day":
+                    raise ValueError("Delivery tracking is for the daily briefing")
+                briefing_gate.install(db)
+                if args.delivered is not None:
+                    return briefing_gate.delivered(db, args.delivered)
+                return briefing_gate.stage(db, ledger.now())
             return briefing(db, args.period)
         if args.command == "heartbeat":
             manifest = fleet._record(bot)

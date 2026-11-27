@@ -61,8 +61,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         return output / "release-acceptance.json"
 
-    def write_artifact(self, kind, head, **changes):
-        artifact = {"kind": kind, "head": head, "result": "passed"}
+    def write_artifact(self, kind, head, *, result="passed", **changes):
+        artifact = {"kind": kind, "head": head, "result": result}
         name = f"{kind}-{head}.json"
         path = self.receipt.parent / name
         if kind == "acceptance":
@@ -89,15 +89,15 @@ class ReleaseTests(unittest.TestCase):
     def publish(self):
         self.git("-C", str(self.remote), "fetch", "--quiet", str(self.checkout), "+HEAD:refs/pull/42/head")
 
-    def verify(self):
+    def verify(self, *options):
         self.receipt.write_text(json.dumps(self.record), encoding="utf-8")
         return subprocess.run(
-            [sys.executable, str(CLI), "release", "verify", str(self.receipt), "--remote", "origin", "--pr", "42"],
+            [sys.executable, str(CLI), "release", "verify", str(self.receipt), "--remote", "origin", "--pr", "42", *options],
             cwd=self.checkout, capture_output=True, text=True,
         )
 
-    def assert_rejected(self, message):
-        result = self.verify()
+    def assert_rejected(self, message, *options):
+        result = self.verify(*options)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertIn(message, result.stderr)
@@ -150,6 +150,50 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["publication"]["head"], new_head)
 
+    def test_merge_verification_requires_a_reviewed_live_check_decision(self):
+        legacy = self.verify()
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        self.assertNotIn("live_checks", json.loads(legacy.stdout))
+        self.assert_rejected("Live checks evidence must name the exact receipt head", "--for-merge")
+
+        for decision in ("passed", "not_applicable"):
+            with self.subTest(decision=decision):
+                entry = self.write_artifact("live_checks", self.head, result=decision,
+                                            observation="Synthetic trial result or applicability rationale")
+                self.record["live_checks"] = entry
+                result = self.verify("--for-merge")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["live_checks"],
+                                 {"result": decision, "evidence": entry["evidence"]})
+
+    def test_merge_verification_rejects_unresolved_or_stale_live_checks(self):
+        kind = "live_checks"
+        merge = "--for-merge"
+        for status in ("failed", "blocked", "unavailable"):
+            with self.subTest(status=status):
+                self.record[kind] = self.write_artifact(kind, self.head, result=status)
+                self.assert_rejected("Live checks requires a passing result or a not_applicable decision", merge)
+
+        self.record[kind] = self.write_artifact(kind, self.head, result="not_applicable")
+        self.record[kind]["result"] = "passed"
+        self.assert_rejected("Live checks artifact must match the receipt decision", merge)
+
+        self.record[kind] = self.write_artifact(kind, self.head, result="not_applicable", observation="")
+        self.assert_rejected("Live checks attestation must name its source and observation", merge)
+
+        self.record[kind] = self.write_artifact(kind, self.head)
+        self.commit("New PR head with the same tree")
+        self.publish()
+        self.assert_rejected("Published PR head differs from the receipt head", merge)
+
+        new_head = self.git("rev-parse", "HEAD")
+        self.record["head"] = new_head
+        for evidence_kind in ("acceptance", "review", "privacy"):
+            self.record[evidence_kind] = self.write_artifact(evidence_kind, new_head)
+        self.assert_rejected("Live checks evidence must name the exact receipt head", merge)
+        self.record[kind]["head"] = new_head
+        self.assert_rejected("Live checks artifact names a different head", merge)
+
     def test_artifacts_must_exist_match_their_digests_and_record_success(self):
         path = self.receipt.parent / self.record["review"]["evidence"]
         path.unlink()
@@ -157,6 +201,7 @@ class ReleaseTests(unittest.TestCase):
         path.write_text("{}", encoding="utf-8")
         self.assert_rejected("Review artifact SHA-256 differs")
         self.record["review"] = self.write_artifact("review", self.head, result="failed")
+        self.record["review"]["result"] = "passed"
         self.assert_rejected("Review artifact must record a passing review result")
         self.record["review"] = self.write_artifact("review", self.head, source="")
         self.assert_rejected("Review attestation must name its source and observation")

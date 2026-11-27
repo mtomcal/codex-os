@@ -94,51 +94,117 @@
         ].join("\n");
     }
 
-    async function initialDelegation(threadId, hostId) {
-        const args = {threadId, hostId, includeOutputs: true, maxOutputCharsPerItem: 12000};
-        let cursor;
-        let oldest;
+    const nonempty = value => typeof value === "string" && value.trim() && !value.includes("\0");
+
+    async function nativeJson(tool, args) {
+        const reply = await tool(args);
+        const payloads = reply.content.filter(item => item.type === "text");
+        if (reply.isError || payloads.length !== 1 || typeof payloads[0].text !== "string") throw Error("Invalid native recovery response");
+        return JSON.parse(payloads[0].text);
+    }
+
+    // Keep the recovery checks in sync with the other standalone desktop adapter.
+    function validateCursor(cursor, seen) {
+        if (cursor === null) return;
+        if (!nonempty(cursor) || seen.has(cursor)) throw Error("Invalid worker history cursor");
+        seen.add(cursor);
+    }
+
+    function validateHistoryPage(history, cursors, chatIds) {
+        validateCursor(history.nextCursor, cursors);
+        if (!Array.isArray(history.threads) || history.threads.length > 50) throw Error("Invalid worker history page");
+        for (const chat of history.threads) {
+            if (!validChat(chat?.id) || !nonempty(chat.kind) || !nonempty(chat.hostId) ||
+                !nonempty(chat.title) || !nonempty(chat.cwd) ||
+                (chat.projectId !== null && !nonempty(chat.projectId)) ||
+                (chat.clientThreadId != null && !nonempty(chat.clientThreadId)) || chatIds.has(chat.id))
+                throw Error("Invalid or repeated worker history entry");
+            chatIds.add(chat.id);
+        }
+    }
+
+    async function readAssignment(read, candidate, projectId, maxOutputCharsPerItem) {
+        const {id, hostId, title, cwd} = candidate;
+        const args = {threadId: id, hostId, includeOutputs: true, maxOutputCharsPerItem};
+        const cursors = new Set();
+        const turnsSeen = new Set();
+        let cursor, turn, projectKnown = candidate.projectId === projectId;
         for (let page = 0; page < 5; page++) {
-            const [reply] = await native(tools.mcp__codex_app__read_thread, {...args, cursor, turnLimit: 10, itemLimit: 100});
-            const detail = JSON.parse(reply);
-            if (detail.thread?.id !== threadId || detail.thread.hostId !== hostId ||
-                detail.thread.kind !== "codex" || detail.thread.cwd !== workdir) return;
-            oldest = detail.turns.at(-1);
-            cursor = detail.page?.nextCursor;
-            if (!cursor) break;
+            const {thread, page: pagination, turns} = await read({...args, cursor, turnLimit: 10, itemLimit: 100});
+            if (thread?.id !== id || thread.kind !== "codex" || thread.hostId !== hostId ||
+                thread.title !== title || thread.cwd !== cwd ||
+                (thread.projectId != null && thread.projectId !== projectId))
+                throw Error("Worker detail differs from native history");
+            projectKnown ||= thread.projectId === projectId;
+            if (!Array.isArray(turns) || !turns.length || turns.length > 10 || pagination?.order !== "newest_first" ||
+                pagination.hasMore !== (pagination.nextCursor !== null))
+                throw Error("Worker turn history incomplete");
+            for (const row of turns) {
+                if (!nonempty(row?.id) || turnsSeen.has(row.id)) throw Error("Invalid or repeated worker turn");
+                turnsSeen.add(row.id);
+            }
+            turn = turns.at(-1);
+            cursor = pagination.nextCursor;
+            validateCursor(cursor, cursors);
+            if (cursor === null) break;
         }
-        if (cursor || !oldest) return;
-        let items = oldest.items;
-        let itemCursor = oldest.nextItemCursor;
-        for (let page = 0; itemCursor && page < 5; page++) {
-            const [reply] = await native(tools.mcp__codex_app__read_thread, {...args, itemCursor, itemLimit: 100});
-            const detail = JSON.parse(reply);
-            items = detail.items;
-            itemCursor = detail.nextItemCursor;
+        if (cursor !== null) throw Error("Initial worker turn unavailable");
+
+        // Native turn summaries may omit a terminal item cursor. Continuations carry it explicitly.
+        let {items, nextItemCursor = null} = turn;
+        cursors.clear();
+        const itemsSeen = new Set();
+        for (let page = 0; page <= 5; page++) {
+            if (!Array.isArray(items) || !items.length || items.length > 100) throw Error("Initial worker item unavailable");
+            for (const item of items) {
+                if (!nonempty(item?.type) || !nonempty(item.id) || itemsSeen.has(item.id))
+                    throw Error("Invalid or repeated worker item");
+                itemsSeen.add(item.id);
+            }
+            validateCursor(nextItemCursor, cursors);
+            if (nextItemCursor === null) {
+                const [input] = items;
+                if (input.type !== "functionCallOutput" || input.namespace !== "codex_app" ||
+                    input.name !== "create_thread" || input.output?.truncated !== false ||
+                    typeof input.output.text !== "string")
+                    throw Error("Initial worker assignment unavailable");
+                const assignment = /^<codex_delegation>\n  <source_thread_id>([^\n]+)<\/source_thread_id>\n  <input>([\s\S]+)<\/input>\n<\/codex_delegation>$/.exec(input.output.text);
+                if (!assignment || assignment[0] !== input.output.text || !validChat(assignment[1]) || !nonempty(assignment[2]))
+                    throw Error("Initial worker assignment invalid");
+                return {envelope: input.output.text, projectKnown};
+            }
+            if (page === 5) break;
+            const next = await read({...args, itemCursor: nextItemCursor, itemLimit: 100});
+            if (next.threadId !== id || next.turnId !== turn.id)
+                throw Error("Worker item page differs from its chat or turn");
+            ({items, nextItemCursor} = next);
         }
-        const input = itemCursor ? undefined : items?.[0];
-        if (input?.type === "functionCallOutput" && input.namespace === "codex_app" &&
-            input.name === "create_thread" && input.output?.truncated === false) return input.output.text;
+        throw Error("Initial worker item unavailable");
     }
 
     async function recoverWorkers(jobs, project, primary) {
         if (!jobs.length) return [];
-        const candidates = new Map();
+        const candidates = [];
+        const chatIds = new Set();
         for (const archived of [false, true]) {
             let cursor;
-            for (let page = 0; page < 5; page++) {
-                const [reply] = await native(tools.mcp__codex_app__list_threads,
+            const cursors = new Set();
+            for (let page = 0; page < 50; page++) {
+                const history = await nativeJson(tools.mcp__codex_app__list_threads,
                     {mode: "history", hostId: "local", archived, limit: 50, cursor});
-                const history = JSON.parse(reply);
+                validateHistoryPage(history, cursors, chatIds);
                 for (const chat of history.threads) {
-                    if (chat.kind === "codex" && chat.hostId === "local" && chat.projectId === project &&
-                        chat.cwd === workdir && chat.id !== primary && validChat(chat.id) &&
+                    if (chat.kind === "codex" && chat.hostId === "local" &&
+                        (chat.projectId === null || chat.projectId === project) && chat.cwd === workdir &&
+                        chat.id !== primary &&
                         jobs.some(job => chat.title === scheduledTitle(job) || chat.title === "CodexOS scheduled " + job.id))
-                        candidates.set(chat.id, chat);
+                        candidates.push(chat);
                 }
                 cursor = history.nextCursor;
-                if (!cursor) break;
+                if (cursor === null) break;
             }
+            // A match from a partial history cannot establish uniqueness.
+            if (cursor !== null) throw Error("Scheduled worker history search incomplete");
         }
         const recovered = [];
         for (const job of jobs) {
@@ -147,10 +213,19 @@
             const expected = "<codex_delegation>\n  <source_thread_id>" + job.chat +
                 "</source_thread_id>\n  <input>" + prompt + "</input>\n</codex_delegation>";
             const matches = [];
-            for (const chat of candidates.values()) {
-                if (chat.id === job.chat || (job.client && chat.clientThreadId && job.client !== chat.clientThreadId) ||
-                    (chat.title !== scheduledTitle(job) && chat.title !== "CodexOS scheduled " + job.id)) continue;
-                if (await initialDelegation(chat.id, job.host) === expected) matches.push(chat.id);
+            try {
+                const read = args => nativeJson(tools.mcp__codex_app__read_thread, args);
+                for (const chat of candidates) {
+                    if (chat.id === job.chat || (job.client && chat.clientThreadId && job.client !== chat.clientThreadId) ||
+                        (chat.title !== scheduledTitle(job) && chat.title !== "CodexOS scheduled " + job.id)) continue;
+                    const assignment = await readAssignment(read, chat, project, 12000);
+                    if (assignment.envelope !== expected) continue;
+                    if (!assignment.projectKnown) throw Error("Scheduled worker project unavailable");
+                    matches.push(chat.id);
+                    if (matches.length > 1) break;
+                }
+            } catch {
+                continue;
             }
             if (matches.length === 1) recovered.push({...job, worker: matches[0]});
         }
@@ -163,8 +238,8 @@
             throw Error("Run the delegated heartbeat from the registered bot project");
         if (automationId !== automation || !validKey(automation))
             throw Error("The wakeup must name the approved native schedule");
-        const [listing] = await native(tools.mcp__codex_app__list_projects, {});
-        const matches = JSON.parse(listing).projects.filter(candidate => candidate.path === workdir &&
+        const {projects} = await nativeJson(tools.mcp__codex_app__list_projects, {});
+        const matches = projects.filter(candidate => candidate.path === workdir &&
             candidate.projectKind === "local" && candidate.hostId === "local");
         if (matches.length !== 1 || matches[0].projectId !== project)
             throw Error("The heartbeat project differs from its approved native registration");
@@ -173,6 +248,7 @@
         const result = await cli("schedule tick" + binding);
         if (!result) return null;
         const attention = new Set();
+        const pendingLaunches = [];
         const recovered = await recoverWorkers(result.recover, project, chat).catch(() => []);
         for (const job of recovered)
             await cli(["schedule bind-worker", job.id, job.worker, job.token].join(" "));
@@ -219,28 +295,33 @@
             if (!launch) continue;
             let worker;
             try {
-                const [reply] = await native(tools.mcp__codex_app__create_thread, {
+                worker = await nativeJson(tools.mcp__codex_app__create_thread, {
                     title: scheduledTitle(job), prompt,
                     target: {type: "project", projectId: project, environment: {type: "local"}},
                 });
-                worker = JSON.parse(reply);
             } catch {
                 // A native error can arrive after creation. Retain the claim for read-only recovery.
+                pendingLaunches.push(job.id);
                 continue;
             }
-            if (worker?.hostId === "local" && validChat(worker.threadId) && worker.threadId !== chat) {
+            const expectedProject = worker?.projectId == null || worker.projectId === project;
+            if (expectedProject && worker?.hostId === "local" && validChat(worker.threadId) &&
+                worker.threadId !== chat && worker.clientThreadId == null) {
                 await cli(["schedule bind-worker", job.id, worker.threadId, job.token].join(" "));
-            } else if ((worker?.hostId == null || worker.hostId === "local") && !worker?.threadId &&
+            } else if (expectedProject && (worker?.hostId == null || worker.hostId === "local") && !worker?.threadId &&
                        typeof worker?.clientThreadId === "string" && worker.clientThreadId.trim() &&
                        worker.clientThreadId.length <= 4096 && !worker.clientThreadId.includes("\0")) {
                 await cli(["schedule queued", job.id, job.token, "--client=" + quote(worker.clientThreadId)].join(" "));
+            } else {
+                pendingLaunches.push(job.id);
             }
         }
         const {first_tick: firstTick} = result.needs_first_tick
             ? await cli("schedule complete-tick" + binding + " --plan " + result.plan +
                 " --generation " + result.generation) : {};
-        if (!attention.size && !firstTick) return null;
+        if (!attention.size && !firstTick && !pendingLaunches.length) return null;
         return {...(attention.size ? {occurrences_to_review: [...attention]} : {}),
+            ...(pendingLaunches.length ? {worker_launches_pending: pendingLaunches} : {}),
             ...(firstTick ? {first_tick: true} : {})};
     }
 
