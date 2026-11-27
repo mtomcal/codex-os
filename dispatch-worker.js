@@ -35,7 +35,9 @@
     async function native(name, args) {
         const reply = await tools["mcp__codex_app__" + name](args);
         if (reply.isError) throw Error("Native Codex operation failed");
-        return JSON.parse(reply.content.find(item => item.type === "text").text);
+        const payloads = reply.content.filter(item => item.type === "text");
+        if (payloads.length !== 1 || typeof payloads[0].text !== "string") throw Error("Invalid native response envelope");
+        return JSON.parse(payloads[0].text);
     }
 
     const context = "import json, os; print(json.dumps([json.load(open('bot.json'))['primary_thread'], os.getenv('CODEX_THREAD_ID')]))";
@@ -64,84 +66,117 @@
         (approvedEnvironment.type === "worktree" && projects[0].isGitRepository !== true))
         return pending(prepared, "native_project_mismatch");
 
-    const matchesChat = chat => chat.kind === "codex" && chat.id !== primary && validChat(chat.id) &&
-        chat.hostId === hostId && (approvedEnvironment.type === "worktree" || chat.cwd === projectPath);
     const envelope = "<codex_delegation>\n  <source_thread_id>" + primary +
         "</source_thread_id>\n  <input>" + prompt + "</input>\n</codex_delegation>";
 
+    // Keep the recovery checks in sync with the other standalone desktop adapter.
     function validateCursor(cursor, seen) {
         if (cursor === null) return;
-        if (typeof cursor !== "string" || !cursor || seen.has(cursor))
-            throw Error("Invalid worker detail cursor");
+        if (!nonempty(cursor) || seen.has(cursor)) throw Error("Invalid worker history cursor");
         seen.add(cursor);
     }
 
-    async function hasAssignment(candidate) {
-        const {id} = candidate;
-        const args = {threadId: id, hostId, includeOutputs: true, maxOutputCharsPerItem: 20000};
-        const seen = new Set();
-        let cursor, turn;
+    function validateHistoryPage(history, cursors, chatIds) {
+        validateCursor(history.nextCursor, cursors);
+        if (!Array.isArray(history.threads) || history.threads.length > 50) throw Error("Invalid worker history page");
+        for (const chat of history.threads) {
+            if (!validChat(chat?.id) || !nonempty(chat.kind) || !nonempty(chat.hostId) ||
+                !nonempty(chat.title) || !nonempty(chat.cwd) ||
+                (chat.projectId !== null && !nonempty(chat.projectId)) ||
+                (chat.clientThreadId != null && !nonempty(chat.clientThreadId)) || chatIds.has(chat.id))
+                throw Error("Invalid or repeated worker history entry");
+            chatIds.add(chat.id);
+        }
+    }
+
+    async function readAssignment(read, candidate, projectId, maxOutputCharsPerItem) {
+        const {id, hostId, title, cwd} = candidate;
+        const args = {threadId: id, hostId, includeOutputs: true, maxOutputCharsPerItem};
+        const cursors = new Set();
+        const turnsSeen = new Set();
+        let cursor, turn, projectKnown = candidate.projectId === projectId;
         for (let page = 0; page < 5; page++) {
-            const detail = await native("read_thread", {...args, cursor, turnLimit: 10, itemLimit: 100});
-            const {thread, page: pagination, turns} = detail;
-            if (thread?.id !== id || !matchesChat(thread) || thread.title !== candidate.title ||
-                (thread.projectId != null && thread.projectId !== projectId) ||
-                (approvedEnvironment.type === "worktree" && (!nonempty(thread.cwd) ||
-                    (candidate.cwd != null && thread.cwd !== candidate.cwd))))
+            const {thread, page: pagination, turns} = await read({...args, cursor, turnLimit: 10, itemLimit: 100});
+            if (thread?.id !== id || thread.kind !== "codex" || thread.hostId !== hostId ||
+                thread.title !== title || thread.cwd !== cwd ||
+                (thread.projectId != null && thread.projectId !== projectId))
                 throw Error("Worker detail differs from native history");
-            if (!Array.isArray(turns) || !turns.length || pagination?.order !== "newest_first" ||
+            projectKnown ||= thread.projectId === projectId;
+            if (!Array.isArray(turns) || !turns.length || turns.length > 10 || pagination?.order !== "newest_first" ||
                 pagination.hasMore !== (pagination.nextCursor !== null))
                 throw Error("Worker turn history incomplete");
+            for (const row of turns) {
+                if (!nonempty(row?.id) || turnsSeen.has(row.id)) throw Error("Invalid or repeated worker turn");
+                turnsSeen.add(row.id);
+            }
             turn = turns.at(-1);
             cursor = pagination.nextCursor;
-            validateCursor(cursor, seen);
+            validateCursor(cursor, cursors);
             if (cursor === null) break;
         }
-        if (cursor !== null || !nonempty(turn?.id)) throw Error("Initial worker turn unavailable");
+        if (cursor !== null) throw Error("Initial worker turn unavailable");
 
+        // Native turn summaries may omit a terminal item cursor. Continuations carry it explicitly.
         let {items, nextItemCursor = null} = turn;
-        seen.clear();
-        for (let page = 0; page < 5; page++) {
-            if (!Array.isArray(items) || !items.length) throw Error("Initial worker item unavailable");
-            validateCursor(nextItemCursor, seen);
-            if (nextItemCursor === null) break;
-            const detail = await native("read_thread", {...args, itemCursor: nextItemCursor, itemLimit: 100});
-            if (detail.threadId !== id || detail.turnId !== turn.id)
+        cursors.clear();
+        const itemsSeen = new Set();
+        for (let page = 0; page <= 5; page++) {
+            if (!Array.isArray(items) || !items.length || items.length > 100) throw Error("Initial worker item unavailable");
+            for (const item of items) {
+                if (!nonempty(item?.type) || !nonempty(item.id) || itemsSeen.has(item.id))
+                    throw Error("Invalid or repeated worker item");
+                itemsSeen.add(item.id);
+            }
+            validateCursor(nextItemCursor, cursors);
+            if (nextItemCursor === null) {
+                const [input] = items;
+                if (input.type !== "functionCallOutput" || input.namespace !== "codex_app" ||
+                    input.name !== "create_thread" || input.output?.truncated !== false ||
+                    typeof input.output.text !== "string")
+                    throw Error("Initial worker assignment unavailable");
+                const assignment = /^<codex_delegation>\n  <source_thread_id>([^\n]+)<\/source_thread_id>\n  <input>([\s\S]+)<\/input>\n<\/codex_delegation>$/.exec(input.output.text);
+                if (!assignment || assignment[0] !== input.output.text || !validChat(assignment[1]) || !nonempty(assignment[2]))
+                    throw Error("Initial worker assignment invalid");
+                return {envelope: input.output.text, projectKnown};
+            }
+            if (page === 5) break;
+            const next = await read({...args, itemCursor: nextItemCursor, itemLimit: 100});
+            if (next.threadId !== id || next.turnId !== turn.id)
                 throw Error("Worker item page differs from its chat or turn");
-            ({items, nextItemCursor} = detail);
+            ({items, nextItemCursor} = next);
         }
-        if (nextItemCursor !== null || !Array.isArray(items) || !items.length)
-            throw Error("Initial worker item unavailable");
-        const [input] = items;
-        if (input?.type !== "functionCallOutput" || input.namespace !== "codex_app" || input.name !== "create_thread" ||
-            input.output?.truncated !== false || typeof input.output.text !== "string")
-            throw Error("Initial worker assignment unavailable");
-        const assignment = /^<codex_delegation>\n  <source_thread_id>([^\n]+)<\/source_thread_id>\n  <input>([\s\S]+)<\/input>\n<\/codex_delegation>$/.exec(input.output.text);
-        if (!assignment || assignment[0] !== input.output.text || !validChat(assignment[1]) || !nonempty(assignment[2]))
-            throw Error("Initial worker assignment invalid");
-        return input.output.text === envelope;
+        throw Error("Initial worker item unavailable");
     }
 
     async function recover(record) {
-        const candidates = new Map();
+        const candidates = [];
+        const chatIds = new Set();
         let matches;
         try {
             for (const archived of [false, true]) {
                 let cursor;
+                const cursors = new Set();
                 for (let page = 0; page < 5; page++) {
                     const history = await native("list_threads", {mode: "history", hostId, archived, cursor, limit: 50});
+                    validateHistoryPage(history, cursors, chatIds);
                     for (const chat of history.threads) {
-                        if (chat.projectId === projectId && chat.title === title && matchesChat(chat))
-                            candidates.set(chat.id, chat);
+                        if (chat.kind === "codex" && chat.id !== primary && chat.hostId === hostId && chat.title === title &&
+                            (chat.projectId === null || chat.projectId === projectId) &&
+                            (approvedEnvironment.type === "worktree" || chat.cwd === projectPath))
+                            candidates.push(chat);
                     }
                     cursor = history.nextCursor;
-                    if (!cursor) break;
+                    if (cursor === null) break;
                 }
-                if (cursor) throw Error("Worker history search incomplete");
+                if (cursor !== null) throw Error("Worker history search incomplete");
             }
             matches = [];
-            for (const chat of candidates.values()) {
-                if (await hasAssignment(chat)) matches.push(chat.id);
+            const read = args => native("read_thread", args);
+            for (const chat of candidates) {
+                const assignment = await readAssignment(read, chat, projectId, 20000);
+                if (assignment.envelope !== envelope) continue;
+                if (!assignment.projectKnown) throw Error("Worker project unavailable");
+                matches.push(chat.id);
             }
         } catch {
             return pending(record, "native_worker_history_unavailable");

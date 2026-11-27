@@ -5,6 +5,7 @@ const {copyFileSync, cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, wri
 const {tmpdir} = require("node:os");
 const {join} = require("node:path");
 const fixture = require("./fixtures/desktop-worker-history.json");
+const {historyCases, turnCases, itemCases} = require("./fixtures/worker-recovery-cases.js");
 
 const source = join(__dirname, "..");
 const workerDispatch = eval(readFileSync(join(source, "dispatch-worker.js"), "utf8"));
@@ -38,6 +39,7 @@ async function run(root) {
     const launches = [];
     let candidates = [];
     let competingWorker = worker;
+    let historyOverride;
     let changeCompetingDetail;
     let changeCompetingItems;
     let pageCompetingHistory = false;
@@ -54,10 +56,10 @@ async function run(root) {
         async mcp__codex_app__list_projects() {
             return reply(fixture.projects);
         },
-        async mcp__codex_app__list_threads({mode, hostId: host, archived}) {
+        async mcp__codex_app__list_threads({mode, hostId: host, archived, cursor}) {
             assert.equal(mode, "history");
             assert.equal(host, hostId);
-            return reply({...fixture.history, threads: archived ? [] : candidates});
+            return reply(historyOverride?.({archived, cursor}) ?? {...fixture.history, threads: archived ? [] : candidates});
         },
         async mcp__codex_app__read_thread({threadId, hostId: host, includeOutputs, cursor, itemCursor}) {
             assert.equal(host, hostId);
@@ -74,11 +76,11 @@ async function run(root) {
             if (pageCompetingHistory) {
                 initialItem.output.text = initialItem.output.text.replace("Parser files only", "Other scope");
                 if (itemCursor === "older-items") {
-                    const items = {...fixture.itemPage, items: [initialItem]};
+                    const items = {...fixture.itemPage, threadId, items: [initialItem]};
                     changeCompetingItems?.(items);
                     return reply(items);
                 }
-                turn.items = [{type: "agentMessage"}];
+                turn.items = [{id: "newer-item", type: "agentMessage"}];
                 turn.nextItemCursor = "older-items";
                 if (!cursor) {
                     turn.id = "newer-turn";
@@ -203,16 +205,38 @@ async function run(root) {
         assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1, shape);
     }
 
+    candidates = [candidate({id: second}), candidate({})];
+    for (const [shape, changePage] of historyCases) {
+        historyOverride = ({archived}) => {
+            const page = {threads: archived ? [] : structuredClone(candidates), nextCursor: null};
+            if (!archived) changePage(page);
+            return page;
+        };
+        changeCompetingDetail = detail => {
+            const output = detail.turns[0].items[0].output;
+            output.text = output.text.replace("Parser files only", "Other scope");
+        };
+        await assertPending(shape);
+    }
+    changeCompetingDetail = undefined;
+    historyOverride = ({archived, cursor}) => ({threads: archived || cursor ? [] : candidates, nextCursor: "loop"});
+    await assertPending("repeated list cursor");
+    historyOverride = ({archived}) => ({threads: archived ? [candidate({projectId: null})] : [candidate({id: second})], nextCursor: null});
+    await assertPending("unknown project for an exact archived assignment");
+    historyOverride = undefined;
+
+    for (const [shape, changeDetail] of turnCases) {
+        changeCompetingDetail = changeDetail;
+        await assertPending(shape);
+    }
     for (const [shape, changeThread] of [
         ["mismatched chat ID", thread => { thread.id = second; }],
         ["omitted chat ID", thread => { delete thread.id; }],
         ["mismatched host", thread => { thread.hostId = "other-host"; }],
         ["omitted host", thread => { delete thread.hostId; }],
         ["mismatched kind", thread => { thread.kind = "chatgpt"; }],
-        ["mismatched project", thread => { thread.projectId = "other-project"; }],
         ["mismatched cwd", thread => { thread.cwd = "/fixture/other"; }],
         ["omitted cwd", thread => { delete thread.cwd; }],
-        ["mismatched title", thread => { thread.title = "Other worker"; }],
         ["omitted title", thread => { delete thread.title; }],
     ]) {
         changeCompetingDetail = detail => changeThread(detail.thread);
@@ -221,15 +245,10 @@ async function run(root) {
     for (const [shape, changeDetail] of [
         ["missing thread metadata", detail => { delete detail.thread; }],
         ["missing turn page metadata", detail => { delete detail.page; }],
-        ["omitted turn cursor", detail => { delete detail.page.nextCursor; }],
-        ["contradictory turn pagination", detail => { detail.page.hasMore = true; }],
         ["malformed turn cursor", detail => { detail.page.nextCursor = true; detail.page.hasMore = true; }],
-        ["incorrect turn order", detail => { detail.page.order = "oldest_first"; }],
         ["empty turn history", detail => { detail.turns = []; }],
         ["missing initial turn ID", detail => { delete detail.turns[0].id; }],
         ["empty item history", detail => { detail.turns[0].items = []; }],
-        ["malformed item cursor", detail => { detail.turns[0].nextItemCursor = false; }],
-        ["wrong initial item", detail => { detail.turns[0].items[0].name = "other"; }],
     ]) {
         changeCompetingDetail = changeDetail;
         await assertPending(shape);
@@ -238,7 +257,6 @@ async function run(root) {
         ["missing text", output => { delete output.text; }],
         ["non-string text", output => { output.text = {value: output.text}; }],
         ["truncated text", output => { output.truncated = true; }],
-        ["malformed delegation envelope", output => { output.text = "Unreadable assignment"; }],
     ]) {
         changeCompetingDetail = detail => changeOutput(detail.turns[0].items[0].output);
         await assertPending(shape);
@@ -271,17 +289,22 @@ async function run(root) {
         ["omitted chat on an item page", page => { delete page.threadId; }],
         ["mismatched turn on an item page", page => { page.turnId = second; }],
         ["omitted turn on an item page", page => { delete page.turnId; }],
-        ["omitted item page cursor", page => { delete page.nextItemCursor; }],
-        ["repeated item cursor", page => { page.nextItemCursor = "older-items"; }],
-        ["empty item page", page => { page.items = []; }],
+        ...itemCases,
     ]) {
         changeCompetingItems = changeItems;
         await assertPending(shape);
     }
     changeCompetingItems = undefined;
+    historyOverride = ({archived, cursor}) => {
+        if (archived) return {threads: [candidate({projectId: null})], nextCursor: null};
+        if (!cursor) return {threads: [], nextCursor: "second-page"};
+        return {threads: [candidate({id: second})], nextCursor: null};
+    };
+    candidates = [candidate({id: second}), candidate({})];
     assert.equal((await dispatch("interrupted")).worker, second,
         "An exact match and a validated different assignment permit unique recovery");
     pageCompetingHistory = false;
+    historyOverride = undefined;
     assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1);
 
     candidates = [];
