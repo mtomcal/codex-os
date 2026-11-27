@@ -1,0 +1,66 @@
+{
+  "projects": {
+    "schemaVersion": 1,
+    "projects": [
+      {
+        "projectId": "fixture-project",
+        "projectKind": "local",
+        "label": "Fixture project",
+        "path": "/fixture/project",
+        "hostId": "local",
+        "hostDisplayName": null,
+        "isGitRepository": true
+      }
+    ]
+  },
+  "history": {
+    "threads": [
+      {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "kind": "codex",
+        "projectId": "fixture-project",
+        "hostId": "local",
+        "status": "active",
+        "cwd": "/fixture/project",
+        "updatedAt": 1700000000,
+        "title": "CodexOS worker fixture",
+        "summary": "Sanitized dispatch"
+      }
+    ],
+    "nextCursor": null
+  },
+  "detail": {
+    "schemaVersion": 1,
+    "thread": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "kind": "codex",
+      "hostId": "local",
+      "title": "CodexOS worker fixture",
+      "preview": "Sanitized dispatch",
+      "status": {"type": "active"},
+      "cwd": "/fixture/project",
+      "createdAt": 1700000000,
+      "updatedAt": 1700000000
+    },
+    "page": {"nextCursor": null},
+    "turns": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "status": "inProgress",
+        "items": [
+          {
+            "id": "sanitized-input",
+            "type": "functionCallOutput",
+            "namespace": "codex_app",
+            "name": "create_thread",
+            "output": {
+              "text": "<codex_delegation>\n  <source_thread_id>11111111-1111-4111-8111-111111111111</source_thread_id>\n  <input>Sample assignment</input>\n</codex_delegation>",
+              "truncated": false,
+              "originalChars": 148
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

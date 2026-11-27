@@ -184,6 +184,7 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     let hiddenWorker;
     let conflictingChats = [];
     let denyLaunch = false;
+    let nativeLaunchCalls = 0;
     let nativeProject = dispatcher.project;
     const desktop = {
         async exec_command({cmd, workdir}) {
@@ -208,6 +209,7 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
         async mcp__codex_app__list_projects() { return reply({projects: [nativeProject]}); },
         async mcp__codex_app__create_thread({target, title, prompt}) {
             assert.deepEqual(target, {type: "project", projectId, environment: {type: "local"}});
+            nativeLaunchCalls++;
             if (denyLaunch) return {isError: true, content: []};
             const [, occurrence, token] = prompt.match(/schedule start ([a-f0-9]{32}) ([a-f0-9]{32})/);
             assert.match(title, new RegExp(occurrence));
@@ -520,7 +522,14 @@ async function checkDelegatedHeartbeat({choices, scope, setupFile, saveSetup, ma
     runCLI("schedule", "review", retried.occurrence, "--revision", String(reviewState.revision),
         "--decision", "cancel", "--evidence", "verified failed worker");
     advance("2026-11-30T23:30:00Z");
+    const callsBeforeDenial = nativeLaunchCalls;
+    const blocked = await pulse();
+    assert.equal(blocked?.worker_launches_pending?.length, 2);
+    assert.ok(blocked.worker_launches_pending.includes(deniedEvent));
+    assert.equal(runCLI("schedule", "attempts", deniedEvent)[0].worker, null);
+    assert.equal(nativeLaunchCalls, callsBeforeDenial + 2);
     assert.equal(await pulse(), null);
+    assert.equal(nativeLaunchCalls, callsBeforeDenial + 2);
     advance("2026-12-01T00:31:00Z");
     const failure = await pulse();
     assert.equal(failure.occurrences_to_review.length, 2);

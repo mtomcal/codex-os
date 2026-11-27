@@ -78,7 +78,7 @@ Record `first_turn` and `first_review` after the approved automation completes a
 
 From an authorized producer or operator workflow, record event readiness using `python3 ../../codexos.py schedule ready ROUTINE EVENT --evidence REFERENCE`. Reuse the event ID on retry. A revised approval carries unclaimed events forward for routines still configured for events. The same event ID preserves the outcome of any previous execution attempt.
 
-The dispatcher claims at most three workers and allows one active occurrence per routine. It checks native history for queued or interrupted launches before acting on an overdue claim. A confirmed interruption before work starts can trigger an automatic retry. An unconfirmed launch or uncertain effect requires review.
+The dispatcher launches each occurrence through the native Codex chat tool in the registered project and host. It claims at most three workers and allows one active occurrence per routine. It checks native history for queued or interrupted launches before acting on an overdue claim. A confirmed interruption before work starts can trigger an automatic retry. If a native launch fails or returns an unexpected response, the tick lists the affected occurrence under `worker_launches_pending`. The claim stays open for native history recovery. An unconfirmed launch or uncertain effect requires review.
 
 Read pending occurrence and attempt updates with `state snapshot --chat CHAT_ID`. For each continuation, pass the preceding page's `next_after` to `--after` and its `revision` to `--revision`. Start a new snapshot if the revision changes. After the last page, acknowledge the revision with `state ack --chat CHAT_ID --revision REVISION`.
 

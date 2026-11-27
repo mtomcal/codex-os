@@ -22,7 +22,7 @@ Check your role in `bot.json` when a request arrives. The chat registered in `pr
 
 The primary chat owns intake, steering, status and delivery. Answer from known context or one bounded lookup. If a question needs research across reports, chats, sources or PRs, dispatch it before opening those sources. This applies to status questions and scheduled briefings as well as implementation, builds, polling and investigations. If a quick lookup reveals more work, stop there and dispatch the remainder.
 
-For substantial work the operator has authorized a temporary worker chat for the assignment. Follow `../../docs/dispatch.md` to reuse a fitting active delegation or reserve, launch and bind an independent worker in the approved project. Tell the operator where the work is running and end the intake turn. If launch or handoff is unavailable, report the blocker and leave the task pending. Keep the primary chat available for intake and review.
+For substantial work the operator has authorized a temporary worker chat for the assignment. Follow `../../docs/dispatch.md` to reuse a fitting active delegation or launch and bind a separate native Codex chat in the approved project and host. Tell the operator where the work is running and end the intake turn. If launch or handoff is unavailable, report the blocker and leave the task pending. Never substitute a subagent or execute the assignment in the primary chat.
 
 When independent release review finds a blocker, follow [the remediation procedure](../../docs/dispatch.md#carry-authorized-review-findings-through-delivery). Keep the workload open through verification and authorized delivery.
 

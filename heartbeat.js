@@ -173,6 +173,7 @@
         const result = await cli("schedule tick" + binding);
         if (!result) return null;
         const attention = new Set();
+        const pendingLaunches = [];
         const recovered = await recoverWorkers(result.recover, project, chat).catch(() => []);
         for (const job of recovered)
             await cli(["schedule bind-worker", job.id, job.worker, job.token].join(" "));
@@ -226,21 +227,27 @@
                 worker = JSON.parse(reply);
             } catch {
                 // A native error can arrive after creation. Retain the claim for read-only recovery.
+                pendingLaunches.push(job.id);
                 continue;
             }
-            if (worker?.hostId === "local" && validChat(worker.threadId) && worker.threadId !== chat) {
+            const expectedProject = worker?.projectId == null || worker.projectId === project;
+            if (expectedProject && worker?.hostId === "local" && validChat(worker.threadId) &&
+                worker.threadId !== chat && worker.clientThreadId == null) {
                 await cli(["schedule bind-worker", job.id, worker.threadId, job.token].join(" "));
-            } else if ((worker?.hostId == null || worker.hostId === "local") && !worker?.threadId &&
+            } else if (expectedProject && (worker?.hostId == null || worker.hostId === "local") && !worker?.threadId &&
                        typeof worker?.clientThreadId === "string" && worker.clientThreadId.trim() &&
                        worker.clientThreadId.length <= 4096 && !worker.clientThreadId.includes("\0")) {
                 await cli(["schedule queued", job.id, job.token, "--client=" + quote(worker.clientThreadId)].join(" "));
+            } else {
+                pendingLaunches.push(job.id);
             }
         }
         const {first_tick: firstTick} = result.needs_first_tick
             ? await cli("schedule complete-tick" + binding + " --plan " + result.plan +
                 " --generation " + result.generation) : {};
-        if (!attention.size && !firstTick) return null;
+        if (!attention.size && !firstTick && !pendingLaunches.length) return null;
         return {...(attention.size ? {occurrences_to_review: [...attention]} : {}),
+            ...(pendingLaunches.length ? {worker_launches_pending: pendingLaunches} : {}),
             ...(firstTick ? {first_tick: true} : {})};
     }
 

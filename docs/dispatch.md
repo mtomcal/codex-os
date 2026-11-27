@@ -1,23 +1,32 @@
 # Keep the primary chat available
 
-The primary chat owns intake, coordination, review, delivery, and cleanup. It answers short questions and handles bounded reads itself. Delegate implementation and other substantial work to a native worker that can keep running after the primary turn ends. Use the approved worker scope and Codex permissions. If the client cannot launch a detached subagent, use an authorized temporary project chat. The worker receives one assignment and the evidence required to review it.
+The primary chat owns intake, coordination, review, delivery, and cleanup. It answers short questions and handles bounded reads itself. Delegate substantial work only to a separate native Codex chat in the approved project and host. If native launch or handoff is unavailable, report the blocker and leave the assignment pending. Never substitute a subagent or run the assignment in the primary chat.
 
 ## Dispatch
 
-1. Capture the objective, allowed project and files, work limits, acceptance criteria, and delivery location. Preserve the user's original scope. Include the authorization for any writes in the worker brief. Assign a stable key and check it with `dispatch show KEY` when recovering intake.
-2. Before reserving a new worker, run `python3 ../../codexos.py dispatch list --active`. Compare the objective, project, files, permitted actions and delivery constraints against the new requirement. If a bound worker clearly covers the addition, confirm its current turn is active on the recorded host and follow [Reuse a bound worker](#reuse-a-bound-worker). If the requirement is independent, outside scope, or the fit is unclear, reserve a separate dispatch.
-3. Complete [permission preflight](#permission-preflight) after scoping and before claiming a launch. From the coordinator project, run the following example. The result includes the saved dispatch and a boolean named `launch`.
+1. Capture the objective, allowed project and files, work limits, acceptance criteria, and delivery location. Preserve the user's original scope and include authorization for any writes in the worker brief. Assign a stable key and check it with `dispatch show KEY` when recovering intake.
+2. Run `python3 ../../codexos.py dispatch list --active`. If a bound worker clearly covers the addition, confirm its turn is active on the recorded host and follow [Reuse a bound worker](#reuse-a-bound-worker). Use a separate dispatch for independent or out-of-scope work.
+3. Complete [permission preflight](#permission-preflight). Resolve the approved project using the native project list. Use a worktree environment only when the user requested it. For workers sharing a checkout, name any predecessor in the brief and tell the worker to wait for it before writing. Tell the worker where to preserve evidence and when to stop.
+4. In desktop code mode, read and run the checked-in adapter from the coordinator's bot directory. Supply the same inputs on recovery.
 
-   ```sh
-   python3 ../../codexos.py dispatch reserve parser-fix \
-       --objective 'Correct the empty-input parser result and show the focused test passing' \
-       --scope 'Approved parser project only: parser.py and its focused test'
+   ```js
+   const script = await tools.exec_command({cmd: "cat ../../dispatch-worker.js", workdir: coordinatorPath});
+   if (script.exit_code !== 0) throw Error(script.output);
+   const result = await eval(script.output)(tools, coordinatorPath, {
+       key: "parser-fix",
+       objective: "Correct the empty-input parser result and verify it",
+       scope: "Approved parser project, parser.py and its focused test",
+       brief: workerBrief,
+       projectId: approvedProject.projectId,
+       projectPath: approvedProject.path,
+       hostId: approvedProject.hostId,
+   });
+   text(result);
    ```
 
-4. When `launch` is true, submit one native worker to the correct project. Include the dispatch key in its title and brief for recovery. Use a separate worktree when the user has requested one. For workers sharing a checkout that can contend on tracked files, staging, or commits, identify the predecessor in the new brief. The new worker can read and draft privately, then waits for the predecessor to finish and checks the checkout before writing. Instruct the worker to preserve evidence and end after its bounded assignment. If an authorized revision arrives, ask it to identify the parent and requirement keys in its response and explain how the result addresses the revision.
-5. Record the returned worker ID with `dispatch bind parser-fix THREAD_ID --host local`. If setup is still pending, keep its native launch reference for reconciliation and bind the actual thread ID once available. Acknowledge the dispatch in the primary chat and end the intake turn. The worker continues independently.
+5. If the result includes a bound worker and host, acknowledge the dispatch in the primary chat and end the intake turn. If the result includes a blocker, tell the operator which native step is pending and end the intake turn.
 
-`launch_issued: 0` means preflight is still open and no launch has been claimed. Resume with the same key, objective and scope. After the first `launch: true`, repeat reservations return `launch: false`. If interrupted after the claim, look up the native worker by key and project and bind its existing ID. If the native service confirms no worker exists, record that evidence with `dispatch abandon KEY --evidence TEXT` and reconcile cleanup. A new attempt uses a new key. Leave an ambiguous reservation visible when native absence cannot be verified.
+The adapter prepares the ledger record, verifies the exact native project and host, and claims the launch once before calling `create_thread`. It binds a returned chat ID with the recorded host. A queued response stays pending until native history shows the chat ID. On resume after a claim, the adapter only searches native history and binds a unique matching chat. Recovery checks the project, host, and original native dispatch prompt. If native absence is confirmed, record the evidence with `dispatch abandon KEY --evidence TEXT` and reconcile cleanup. Any authorized new attempt uses a new key. An uncertain or ambiguous launch stays open for review.
 
 ## Permission preflight
 
