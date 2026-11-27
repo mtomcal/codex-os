@@ -38,6 +38,7 @@ async function run(root) {
     const launches = [];
     let candidates = [];
     let detailChanges = {};
+    let changeCompetingOutput;
     let currentChat = coordinator;
     const desktop = {
         async exec_command({cmd, workdir}) {
@@ -64,6 +65,7 @@ async function run(root) {
             const output = input.turns[0].items[0].output;
             output.text = output.text.replace("Sample assignment", launches.at(-1).prompt);
             output.originalChars = output.text.length;
+            if (threadId === worker) changeCompetingOutput?.(output);
             return reply(input);
         },
         async mcp__codex_app__create_thread(args) {
@@ -171,8 +173,21 @@ async function run(root) {
     candidates.push(candidate({}));
     assert.equal((await dispatch("interrupted")).blocker, "native_worker_ambiguous");
     assert.equal(show("interrupted").worker, null);
-    candidates.pop();
+    for (const [shape, changeOutput] of [
+        ["missing text", output => { delete output.text; }],
+        ["non-string text", output => { output.text = {value: output.text}; }],
+        ["truncated text", output => { output.truncated = true; }],
+    ]) {
+        changeCompetingOutput = changeOutput;
+        const result = await dispatch("interrupted");
+        assert.equal(show("interrupted").worker, null, `A competing assignment with ${shape} must keep recovery unbound`);
+        assert.equal(result.blocker, "native_worker_history_unavailable", shape);
+        assert.equal(result.launch, false, shape);
+        assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1);
+    }
+    changeCompetingOutput = output => { output.text = output.text.replace("Parser files only", "Other scope"); };
     assert.equal((await dispatch("interrupted")).worker, second);
+    changeCompetingOutput = undefined;
     assert.equal(launches.filter(args => args.title.endsWith("interrupted")).length, 1);
 
     candidates = [];

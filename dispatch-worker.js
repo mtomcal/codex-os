@@ -88,7 +88,8 @@
         const [input] = items;
         if (input.type !== "functionCallOutput" || input.namespace !== "codex_app" || input.name !== "create_thread")
             return false;
-        if (input.output?.truncated !== false) throw Error("Initial worker assignment unavailable");
+        if (input.output?.truncated !== false || typeof input.output.text !== "string")
+            throw Error("Initial worker assignment unavailable");
         return input.output.text === envelope;
     }
 
