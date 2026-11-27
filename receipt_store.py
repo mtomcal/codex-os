@@ -135,7 +135,7 @@ class Receipt:
                 pass
 
     def release(self, bot, archive):
-        pending = f".release-{self.sha256}-{self.filename}"
+        pending = self.release_stage()
         try:
             with directory(bot / "evidence") as hot:
                 return self.release_from(hot, archive, pending)
@@ -147,6 +147,34 @@ class Receipt:
             except FileNotFoundError:
                 return "absent"
             raise
+
+    def release_stage(self):
+        return f".release-{self.sha256}-{self.filename}"
+
+    def restore_staged(self, bot, state):
+        pending = self.release_stage()
+        try:
+            with directory("evidence-archive", state) as archive:
+                require_private(os.fstat(archive))
+                attrs = os.stat(pending, dir_fd=archive, follow_symlinks=False)
+                if not stat.S_ISREG(attrs.st_mode):
+                    raise ValueError("staged release must be a regular file")
+                with directory(bot / "evidence") as hot:
+                    self.restore_hot(hot, archive, pending)
+        except FileNotFoundError:
+            pass
+
+    def restore_hot(self, hot, archive, pending):
+        try:
+            os.link(pending, self.filename, src_dir_fd=archive, dst_dir_fd=hot, follow_symlinks=False)
+        except FileExistsError:
+            original = os.stat(pending, dir_fd=archive, follow_symlinks=False)
+            current = os.stat(self.filename, dir_fd=hot, follow_symlinks=False)
+            if not os.path.samestat(original, current):
+                raise ValueError(f"release interrupted; newer hot file exists and {pending} is retained")
+        os.fsync(hot)
+        os.unlink(pending, dir_fd=archive)
+        os.fsync(archive)
 
     def release_from(self, hot, archive, pending):
         try:
@@ -168,16 +196,7 @@ class Receipt:
         try:
             self.check(read_file(archive, pending), "released")
         except ValueError as exc:
-            try:
-                os.link(pending, self.filename, src_dir_fd=archive, dst_dir_fd=hot, follow_symlinks=False)
-            except FileExistsError:
-                original = os.stat(pending, dir_fd=archive, follow_symlinks=False)
-                current = os.stat(self.filename, dir_fd=hot, follow_symlinks=False)
-                if not os.path.samestat(original, current):
-                    raise ValueError(f"release interrupted; newer hot file exists and {pending} is retained") from exc
-            os.fsync(hot)
-            os.unlink(pending, dir_fd=archive)
-            os.fsync(archive)
+            self.restore_hot(hot, archive, pending)
             raise ValueError("receipt changed during release; restored the replacement") from exc
         os.unlink(pending, dir_fd=archive)
         os.fsync(archive)
@@ -203,7 +222,17 @@ def run(db, args, bot):
                 AND json_extract(h.evidence,'$.file')=? LIMIT 1
             """, (receipt.filename,)).fetchone()
             if pinned:
+                receipt.restore_staged(bot, state)
                 raise ValueError("active or retryable work pins this receipt filename")
+            path = f"evidence/{receipt.filename}"
+            pinned = db.execute("""
+                SELECT 1 FROM ledger_memory WHERE status='active'
+                AND (expires IS NULL OR expires > CAST(strftime('%s', 'now') AS INTEGER))
+                AND (source=? OR evidence=?) LIMIT 1
+            """, (path, path)).fetchone()
+            if pinned:
+                receipt.restore_staged(bot, state)
+                raise ValueError("active memory pins this receipt filename")
         try:
             os.mkdir("evidence-archive", 0o700, dir_fd=state)
         except FileExistsError:

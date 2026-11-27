@@ -8,7 +8,10 @@ from pathlib import Path
 import re
 import subprocess
 
+from receipt_store import directory, read_file
+
 OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def positive_number(value):
@@ -45,8 +48,33 @@ def evidence(receipt, kind, head):
         raise ValueError(f"{kind.capitalize()} evidence must name the exact receipt head")
     reference = entry.get("evidence")
     if entry.get("result") != "passed" or not isinstance(reference, str) or not reference.strip():
-        raise ValueError(f"{kind.capitalize()} requires a passing result and an evidence reference")
+        raise ValueError(f"{kind.capitalize()} requires a passing result and an evidence file")
+    digest = entry.get("sha256")
+    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
+        raise ValueError(f"{kind.capitalize()} requires the SHA-256 of its evidence file")
     return entry
+
+
+def verify_artifact(folder, kind, entry, head, tree):
+    name = kind.capitalize()
+    path = folder / entry["evidence"]
+    try:
+        with directory(path.parent) as source:
+            data = read_file(source, path.name)
+    except OSError:
+        raise ValueError(f"Cannot read {kind} evidence file") from None
+    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        raise ValueError(f"{name} artifact SHA-256 differs from the release receipt")
+    try:
+        artifact = json.loads(data)
+    except ValueError:
+        raise ValueError(f"{name} artifact must be valid JSON") from None
+    if not isinstance(artifact, dict) or artifact.get("kind") != kind or artifact.get("result") != "passed":
+        raise ValueError(f"{name} artifact must record a passing {kind} result")
+    if artifact.get("head") != head:
+        raise ValueError(f"{name} artifact names a different head")
+    if kind == "acceptance" and artifact.get("tree") != tree:
+        raise ValueError("Acceptance artifact names a different tree")
 
 
 def verify(args):
@@ -69,6 +97,9 @@ def verify(args):
     tree = git("rev-parse", "--verify", f"{head}^{{tree}}", failure="Cannot resolve the receipt head tree")
     if acceptance.get("tree") != tree:
         raise ValueError("Acceptance evidence does not match the receipt head tree")
+
+    for kind, entry in (("acceptance", acceptance), ("review", review), ("privacy", privacy)):
+        verify_artifact(args.receipt.parent, kind, entry, head, tree)
 
     url = git("remote", "get-url", "--", args.remote, failure="Cannot resolve the selected Git remote")
     if receipt.get("repository") != url:

@@ -30,11 +30,20 @@ class ReleaseTests(unittest.TestCase):
         self.record = {
             "pr": 42, "repository": str(self.remote), "head": self.head,
             **{
-                kind: {"head": self.head, "result": "passed", "evidence": f"fixture-{kind}"}
-                for kind in ("acceptance", "review", "privacy")
+                kind: self.write_artifact(kind, self.head) for kind in ("acceptance", "review", "privacy")
             },
         }
-        self.record["acceptance"]["tree"] = self.tree
+
+    def write_artifact(self, kind, head, **changes):
+        artifact = {"kind": kind, "head": head, "result": "passed"}
+        if kind == "acceptance":
+            artifact["tree"] = self.tree
+        name = f"{kind}-{head}.json"
+        data = json.dumps({**artifact, **changes}).encode()
+        (self.receipt.parent / name).write_bytes(data)
+        return {key: value for key, value in artifact.items() if key != "kind"} | {
+            "evidence": name, "sha256": hashlib.sha256(data).hexdigest(),
+        }
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.checkout, capture_output=True, text=True,
@@ -72,7 +81,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(observed["publication"]["ref"], "refs/pull/42/head")
         self.assertEqual(observed["publication"]["head"], self.head)
         for kind in ("acceptance", "review", "privacy"):
-            self.assertEqual(observed[kind], f"fixture-{kind}")
+            self.assertEqual(observed[kind], self.record[kind]["evidence"])
 
         self.commit("New PR head with the same tree")
         self.publish()
@@ -80,13 +89,33 @@ class ReleaseTests(unittest.TestCase):
         self.assert_rejected("Published PR head differs from the receipt head")
 
         new_head = self.git("rev-parse", "HEAD")
+        saved = {kind: self.record[kind].copy() for kind in ("acceptance", "review", "privacy")}
         self.record["head"] = new_head
         for kind in ("acceptance", "review", "privacy"):
-            self.assert_rejected(f"{kind.capitalize()} evidence must name the exact receipt head")
-            self.record[kind].update(head=new_head, evidence=f"refreshed-fixture-{kind}")
+            self.record[kind]["head"] = new_head
+        for kind in ("acceptance", "review", "privacy"):
+            self.assert_rejected(f"{kind.capitalize()} artifact names a different head")
+            self.record[kind] = self.write_artifact(kind, new_head)
         result = self.verify()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["publication"]["head"], new_head)
+
+        self.record.update(saved)
+        for kind in ("acceptance", "review", "privacy"):
+            self.assert_rejected(f"{kind.capitalize()} evidence must name the exact receipt head")
+            self.record[kind] = self.write_artifact(kind, new_head)
+
+    def test_artifacts_must_exist_match_their_digests_and_record_success(self):
+        path = self.receipt.parent / self.record["review"]["evidence"]
+        path.unlink()
+        self.assert_rejected("Cannot read review evidence file")
+        path.write_text("{}", encoding="utf-8")
+        self.assert_rejected("Review artifact SHA-256 differs")
+        self.record["review"] = self.write_artifact("review", self.head, result="failed")
+        self.assert_rejected("Review artifact must record a passing review result")
+        self.record["review"] = self.write_artifact("review", self.head)
+        self.record["acceptance"] = self.write_artifact("acceptance", self.head, tree=self.head)
+        self.assert_rejected("Acceptance artifact names a different tree")
 
     def test_tree_and_repository_must_match_and_pr_ref_must_exist(self):
         self.record["acceptance"]["tree"] = self.head

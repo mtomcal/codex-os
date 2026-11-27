@@ -422,6 +422,20 @@ def receipt_archival(r):
     hot.write_bytes(passed)
     new_ref = json.loads(transition(6, "completed", "--receipt", name)["evidence"])
     before = ledger_references()
+    link = f"evidence/{name}"
+    r.cli("memory", "add", "archive-evidence", "The latest check passed", "--source", "operator",
+          "--evidence", link)
+    r.check("Active memory links to the accepted hot receipt", True,
+            f"(<{link}>)" in r.cli("memory", "index", raw=True).decode())
+    rotate(7, "--release-hot", rejected="active memory pins")
+    r.check("A memory pin keeps the accepted hot bytes", passed.hex(), hot.read_bytes().hex())
+    r.cli("memory", "resolve", "archive-evidence", "1", "--latest", "1", "--source", "operator",
+          "--evidence", "https://example.test/review")
+    r.cli("memory", "add", "archive-evidence", "The latest check passed", "--source", link,
+          "--evidence", "https://example.test/review")
+    rotate(7, "--release-hot", rejected="active memory pins")
+    r.cli("memory", "add", "archive-evidence", "The latest check passed", "--source", link,
+          "--evidence", "https://example.test/review", "--expires", "2020-01-01T00:00:00Z")
     r.check("Historical resolution follows the original digest across filename reuse", failed.hex(), resolved(4).hex())
     r.check("Rotating the historical version preserves the newer hot file", ["different", passed.hex()],
             [rotate(4, "--release-hot")["hot"], hot.read_bytes().hex()])
@@ -433,6 +447,14 @@ def receipt_archival(r):
     r.check("The content-addressed archive is private", [0, 0], [archive.stat().st_mode & 0o077, blob.stat().st_mode & 0o077])
 
     pending = archive / (".release-" + new_ref["sha256"] + "-" + name)
+    hot.rename(pending)
+    r.cli("memory", "add", "archive-evidence", "The latest check passed", "--source", "operator",
+          "--evidence", link)
+    rotate(7, "--release-hot", rejected="active memory pins")
+    r.check("A new memory pin restores the hot path after an interrupted release", [passed.hex(), False],
+            [hot.read_bytes().hex(), pending.exists()])
+    r.cli("memory", "add", "archive-evidence", "The latest check passed", "--source", "operator",
+          "--evidence", "https://example.test/review")
     blob.write_bytes(receipt("passed", "tampered-run"))
     rotate(7, "--release-hot", rejected="archived receipt SHA-256")
     r.check("Failed archive verification preserves the hot copy", passed.hex(), hot.read_bytes().hex())
